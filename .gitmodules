@@ -1,0 +1,3 @@
+[submodule "github-data-fetching"]
+	path = github-data-fetching
+	url = https://github.com/FrankHeijden/incoder-analysis
