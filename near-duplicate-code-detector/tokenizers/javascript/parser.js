@@ -1,93 +1,103 @@
-var esprima = require('esprima');
-const fs = require('fs');
+const { tokenize } = require('esprima');
+const { cpus } = require('os');
+const { access, readdir, mkdir, readFile } = require('fs/promises');
+const { createWriteStream } = require('fs');
+const { createGzip } = require('zlib');
 const path = require('path');
-const zlib = require('zlib');
+const cluster = require('cluster');
 
+const cpuCount = cpus().length;
 
-// List all files in a directory in Node.js recursively in a synchronous fashion
-function listAllFilesRecursive(dir, suffix, filelist) {
-    var files = fs.readdirSync(dir);
-    for (var i in files) {
-        var filepath = path.join(dir, files[i])
-        try{
-            if (fs.statSync(filepath).isDirectory()) {
-                filelist = listAllFilesRecursive(filepath, suffix, filelist);
-            } else {
-                filelist.push(filepath);
-            }
-        } catch (err) {
-            console.warn("Failed to stat "+ filepath + " continuing...");
-        }
-    }
-    return filelist;
-};
-
-function getTokens(codeText, identifiersOnly) {
-    var tokenText = [];
-    var tokens = esprima.tokenize(codeText)
-    for (var i in tokens) {
-        if (!identifiersOnly || tokens[i]['type'] == "Identifier") {
-            tokenText.push(tokens[i]['value']);
-        }
-    }
-    return tokenText;
-}
-
-function extractForFolder(dir, identifiersOnly, outpath, baseDir) {    
-    var all_files = listAllFilesRecursive(dir, '.js', []);   
-
-    var all_json = []
-
-    for (var i in all_files) {
-        console.log('Opening ' + all_files[i]);
-        var filecontent = fs.readFileSync(all_files[i]).toString();
-        try {
-            var tokens = getTokens(filecontent, identifiersOnly);
-            var jsonStr = JSON.stringify({'filename': path.relative(baseDir, all_files[i]), 'tokens': tokens});
-            all_json.push(jsonStr);
-        } catch (err) {
-            console.warn('Error when extracting '+ all_files[i] + ' : ' + err);
-        }
+async function main() {
+    if (process.argv.length != 4) {
+        console.error(`Usage: ${process.argv[0]} ${process.argv[1]} INPUT_FOLDER OUTPUT_FOLDER`);
     }
 
-    var gzipped = new Buffer(all_json.join('\n'));
-    fs.writeFileSync(outpath, zlib.gzipSync(gzipped));
-}
+    let inputDir = process.argv[2];
+    let outputDir = process.argv[3];
 
-if (process.argv.length != 4) {
-    console.error(`Usage: ${process.argv[0]} ${process.argv[1]} PROJECTS_FOLDER OUTPUT_FOLDER`);
-    process.exit(1);
-}
-
-const base_dir = process.argv[2];
-if(!fs.existsSync(base_dir)) {
-    console.error(`Error: Directory "${base_dir}" does not exist.`);
-    process.exit(1);
-}
-if(!fs.lstatSync(base_dir).isDirectory()) {
-    console.error(`Error: "${base_dir}" is not a directory.`);
-    process.exit(1);
-}
-
-const output_dir = process.argv[3];
-if(fs.existsSync(output_dir) && !fs.lstatSync(output_dir).isDirectory()) {
-    console.error(`Error: "${output_dir}" is not a directory.`);
-    process.exit(1);
-}
-
-if(!fs.existsSync(output_dir)) {
-    fs.mkdirSync(output_dir);
-}
-
-fs.readdirSync(base_dir).forEach(project_name => {
-    const project_dir = path.join(base_dir, project_name);
-    if (!fs.lstatSync(project_dir).isDirectory()) {
-        return;
+    if (!inputDir || !outputDir) {
+        console.error('You must provide an input and output directory');
+        process.exit(1);
     }
 
-    console.log(`Extracting ${project_dir}`);
-    
-    const project_output_file = path.join(output_dir, project_name + ".json.gz");
-    extractForFolder(project_dir, false, project_output_file, base_dir);
-});
+    inputDir = path.resolve(process.cwd(), inputDir);
+    outputDir = path.resolve(process.cwd(), outputDir);
 
+    try {
+        await access(inputDir);
+    } catch (e) {
+        console.error(`Input directory ${inputDir} does not exist or is not accessible: ${e.message}`);
+        process.exit(1);
+    }
+
+    await mkdir(outputDir, { recursive: true });
+
+    for (let i = 0; i < cpuCount; i++) {
+        const worker = cluster.fork({
+            BATCH_COUNT: cpuCount,
+            BATCH_NUMBER: (i + 1).toString(),
+            INPUT_DIR: inputDir,
+            OUTPUT_DIR: outputDir,
+        });
+
+        worker.on('error', (error) => {
+            console.error(`[WORKER${i + 1}] Exited with error: ${error.message}`)
+        });
+
+        console.log(`[MASTER] Created worker ${i + 1}`);
+    }
+}
+
+const compareStrings = (a, b) => a > b ? 1 : b > a ? -1 : 0;
+
+async function handleFiles() {
+    const batchNumber = parseInt(process.env.BATCH_NUMBER);
+    if (Number.isNaN(batchNumber)) {
+        console.error(`Invalid batch number (${process.env.BATCH_NUMBER}). Worker was spawned incorrectly`)
+        process.exit(1);
+    }
+
+    const batchCount = parseInt(process.env.BATCH_COUNT);
+    if (Number.isNaN(batchCount)) {
+        console.error(`Invalid batch count (${process.env.BATCH_COUNT}). Worker was spawned incorrectly`)
+        process.exit(1);
+    }
+
+    const inputDir = process.env.INPUT_DIR;
+    const outputDir = process.env.OUTPUT_DIR;
+
+    if (!inputDir || !outputDir) {
+        console.error(`Invalid input and/or output dirs: ${inputDir}, ${outputDir}. Worker was spawned incorrectly`)
+        process.exit(1);
+    }
+
+    const outputFilePath = path.resolve(outputDir, `batch-${batchNumber}.json.gz`)
+    let writeStream = undefined;
+
+    let dirents = await readdir(inputDir, { withFileTypes: true });
+    dirents.sort((a, b) => compareStrings(a.name, b.name));
+    dirents = dirents.filter(dirent => dirent.isFile() && path.extname(dirent.name) === '.js')
+    dirents = dirents.filter((_, i) => (i + (batchCount - batchNumber + 1)) % batchCount === 0)
+
+    for (const dirent of dirents) {
+        writeStream ??= createGzip().pipe(createWriteStream(outputFilePath));
+        const filePath = path.resolve(inputDir, dirent.name);
+        const fileCode = await readFile(filePath, 'utf8');
+        const tokens = tokenize(fileCode).map(token => token.value);
+        const obj = { filename: path.relative(inputDir, filePath), tokens };
+        writeStream.write(JSON.stringify(obj) + '\n')
+    }
+
+    writeStream?.end();
+
+    console.log(`[WORKER${batchNumber + 1}] Processed ${dirents.length} files`)
+}
+
+if (cluster.isMaster) {
+    main();
+} else {
+    handleFiles().then(() => {
+        process.exit(0);
+    });
+}
