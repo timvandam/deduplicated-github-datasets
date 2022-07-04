@@ -5,6 +5,7 @@ const {createWriteStream} = require('fs');
 const zlib = require('zlib');
 const path = require('path');
 const cluster = require('cluster');
+const {finished} = require('stream/promises');
 
 const {createGzip} = zlib;
 
@@ -74,26 +75,22 @@ async function handleFiles() {
 
     const outputFilePath = path.resolve(outputDir, `batch-${batchNumber}.json.gz`)
 
-    const writeStream = (() => {
-        let _writeStream = undefined;
-        return () => {
-            if (_writeStream) {
-                return _writeStream;
-            }
+    const gzip = createGzip({
+        chunkSize: 1024,
+        flush: zlib.constants.Z_SYNC_FLUSH,
+        level: 9,
+        memLevel: 8,
+        windowBits: 15,
+    });
 
-            _writeStream = createGzip({
-                chunkSize: 1024,
-                flush: zlib.constants.Z_SYNC_FLUSH,
-                level: 9,
-                memLevel: 8,
-                windowBits: 15,
-            });
-
-            _writeStream.pipe(createWriteStream(outputFilePath, 'utf8'));
-
-            return _writeStream;
+    let write = undefined;
+    const writeStream = () => {
+        if (write) {
+            return write;
         }
-    })();
+        write = gzip.pipe(createWriteStream(outputFilePath, 'utf8'));
+        return write;
+    }
 
     let dirents = await readdir(inputDir, {withFileTypes: true});
     dirents.sort((a, b) => compareStrings(a.name, b.name));
@@ -104,22 +101,27 @@ async function handleFiles() {
         return;
     }
 
-    console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files`)
+    console.log(`[WORKER${batchNumber}] Processing ${dirents.length} files`)
 
     for (const dirent of dirents) {
         const filePath = path.resolve(inputDir, dirent.name);
         const fileCode = await readFile(filePath, 'utf8');
         try {
+            writeStream();
             const tokens = tokenize(fileCode).map(token => token.value);
             const obj = {filename: path.relative(inputDir, filePath), tokens};
-            writeStream().write(JSON.stringify(obj))
-            writeStream().write('\n')
+            gzip.write(JSON.stringify(obj))
+            gzip.write('\n')
         } catch (e) {
             // If tokenization errors we can just skip the file
         }
     }
 
-    writeStream()?.end();
+    gzip.end();
+    await finished(gzip);
+    if (write) {
+        await finished(write);
+    }
 
     console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files`)
 }

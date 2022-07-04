@@ -1,5 +1,5 @@
 # deduplicated-github-datasets
-Repository for fetching datasets from the top-X GitHub repositories and deduplicating them
+Repository for fetching datasets from the top-1000 GitHub repositories and deduplicating them
 
 ## Cloning this repository
 ```shell

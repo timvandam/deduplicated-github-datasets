@@ -51,7 +51,6 @@ def tokenize_all_files(batch_number: int, batch_count: int, files: List[str], in
 
 def main(input_folder: str, output_folder: str, only_ids: bool = False):
     os.makedirs(output_folder, exist_ok=True)
-    # TODO: Get all files
     python_files = [
         file for file in os.listdir(input_folder)
         if os.path.isfile(os.path.join(input_folder, file))

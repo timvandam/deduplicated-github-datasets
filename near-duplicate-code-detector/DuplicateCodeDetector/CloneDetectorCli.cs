@@ -56,7 +56,7 @@ namespace NearCloneDetector
                     cd.FindNearDuplicates(double.Parse(arguments["--key-jaccard-threshold"].ToString()),
                                           double.Parse(arguments["--jaccard-threshold"].ToString())))
                 {
-                    Console.WriteLine($"Near duplicate: ({File1}-->{File2}) [scores: {JaccardSimilarity: #.##}, {KeyJacardSimilarity: #.#}]");
+//                    Console.WriteLine($"Near duplicate: ({File1}-->{File2}) [scores: {JaccardSimilarity: #.##}, {KeyJacardSimilarity: #.#}]");
                     writer.WriteLine($"{File1},{File2},{JaccardSimilarity},{KeyJacardSimilarity}");
                 }
             }
