@@ -46,6 +46,7 @@ def tokenize_all_files(batch_number: int, batch_count: int, files: List[str], in
             yield tokenize_file(input_folder, file, only_ids)
 
     save_jsonl_gz(all_file_tokenizer(), os.path.join(output_folder, f"batch-{batch_number}.json.gz"))
+    print(f"[WORKER{batch_number}] Finished tokenizing {len(files)} files")
 
 
 def main(input_folder: str, output_folder: str, only_ids: bool = False):

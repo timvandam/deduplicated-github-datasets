@@ -1,10 +1,12 @@
-const { tokenize } = require('esprima');
-const { cpus } = require('os');
-const { access, readdir, mkdir, readFile } = require('fs/promises');
-const { createWriteStream } = require('fs');
-const { createGzip } = require('zlib');
+const {tokenize} = require('esprima');
+const {cpus} = require('os');
+const {access, readdir, mkdir, readFile} = require('fs/promises');
+const {createWriteStream} = require('fs');
+const zlib = require('zlib');
 const path = require('path');
 const cluster = require('cluster');
+
+const {createGzip} = zlib;
 
 const cpuCount = cpus().length;
 
@@ -31,7 +33,7 @@ async function main() {
         process.exit(1);
     }
 
-    await mkdir(outputDir, { recursive: true });
+    await mkdir(outputDir, {recursive: true});
 
     for (let i = 0; i < cpuCount; i++) {
         const worker = cluster.fork({
@@ -44,8 +46,6 @@ async function main() {
         worker.on('error', (error) => {
             console.error(`[WORKER${i + 1}] Exited with error: ${error.message}`)
         });
-
-        console.log(`[MASTER] Created worker ${i + 1}`);
     }
 }
 
@@ -73,25 +73,51 @@ async function handleFiles() {
     }
 
     const outputFilePath = path.resolve(outputDir, `batch-${batchNumber}.json.gz`)
-    let writeStream = undefined;
 
-    let dirents = await readdir(inputDir, { withFileTypes: true });
+    const writeStream = (() => {
+        let _writeStream = undefined;
+        return () => {
+            if (_writeStream) {
+                return _writeStream;
+            }
+
+            _writeStream = createGzip({
+                chunkSize: 1024,
+                flush: zlib.constants.Z_SYNC_FLUSH,
+                level: 9,
+                memLevel: 8,
+                windowBits: 15,
+            });
+
+            _writeStream.pipe(createWriteStream(outputFilePath, 'utf8'));
+
+            return _writeStream;
+        }
+    })();
+
+    let dirents = await readdir(inputDir, {withFileTypes: true});
     dirents.sort((a, b) => compareStrings(a.name, b.name));
     dirents = dirents.filter(dirent => dirent.isFile() && path.extname(dirent.name) === '.js')
     dirents = dirents.filter((_, i) => (i + (batchCount - batchNumber + 1)) % batchCount === 0)
 
+    if (dirents.length === 0) {
+        return;
+    }
+
+    console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files`)
+
     for (const dirent of dirents) {
-        writeStream ??= createGzip().pipe(createWriteStream(outputFilePath));
         const filePath = path.resolve(inputDir, dirent.name);
         const fileCode = await readFile(filePath, 'utf8');
         const tokens = tokenize(fileCode).map(token => token.value);
-        const obj = { filename: path.relative(inputDir, filePath), tokens };
-        writeStream.write(JSON.stringify(obj) + '\n')
+        const obj = {filename: path.relative(inputDir, filePath), tokens};
+        writeStream().write(JSON.stringify(obj))
+        writeStream().write('\n')
     }
 
-    writeStream?.end();
+    writeStream()?.end();
 
-    console.log(`[WORKER${batchNumber + 1}] Processed ${dirents.length} files`)
+    console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files`)
 }
 
 if (cluster.isMaster) {
