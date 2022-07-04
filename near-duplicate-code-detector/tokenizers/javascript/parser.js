@@ -109,10 +109,14 @@ async function handleFiles() {
     for (const dirent of dirents) {
         const filePath = path.resolve(inputDir, dirent.name);
         const fileCode = await readFile(filePath, 'utf8');
-        const tokens = tokenize(fileCode).map(token => token.value);
-        const obj = {filename: path.relative(inputDir, filePath), tokens};
-        writeStream().write(JSON.stringify(obj))
-        writeStream().write('\n')
+        try {
+            const tokens = tokenize(fileCode).map(token => token.value);
+            const obj = {filename: path.relative(inputDir, filePath), tokens};
+            writeStream().write(JSON.stringify(obj))
+            writeStream().write('\n')
+        } catch (e) {
+            // If tokenization errors we can just skip the file
+        }
     }
 
     writeStream()?.end();

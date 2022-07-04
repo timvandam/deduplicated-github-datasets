@@ -24,13 +24,10 @@ import os
 def tokenize_file(input_folder: str, file: str, only_ids: bool = False) -> Iterator[str]:
     file_path = os.path.join(input_folder, file)
     tokens = []
-    try:
-        with open(file_path, 'rb') as f:
-            for toknum, tokval, _, _, _ in tokenize(f.readline):
-                if (not only_ids) or toknum in {NAME, STRING}:
-                    tokens.append(tokval)
-    except Exception as e:
-        print('Error tokenizing %s because %s' % (file_path, e))
+    with open(file_path, 'rb') as f:
+        for toknum, tokval, _, _, _ in tokenize(f.readline):
+            if (not only_ids) or toknum in {NAME, STRING}:
+                tokens.append(tokval)
     return {"filename": os.path.relpath(file_path, input_folder), "tokens": tokens}
 
 
@@ -43,7 +40,10 @@ def tokenize_all_files(batch_number: int, batch_count: int, files: List[str], in
 
     def all_file_tokenizer():
         for file in files:
-            yield tokenize_file(input_folder, file, only_ids)
+            try:
+                yield tokenize_file(input_folder, file, only_ids)
+            except:
+                pass
 
     save_jsonl_gz(all_file_tokenizer(), os.path.join(output_folder, f"batch-{batch_number}.json.gz"))
     print(f"[WORKER{batch_number}] Finished tokenizing {len(files)} files")
