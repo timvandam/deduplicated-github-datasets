@@ -20,6 +20,8 @@ from docopt import docopt
 from dpu_utils.utils import save_jsonl_gz
 import os
 
+total_files = 0
+valid_files = 0
 
 def tokenize_file(input_folder: str, file: str, only_ids: bool = False) -> Iterator[str]:
     file_path = os.path.join(input_folder, file)
@@ -39,14 +41,20 @@ def tokenize_all_files(batch_number: int, batch_count: int, files: List[str], in
     print(f"[WORKER{batch_number}] Tokenizing {len(files)} files")
 
     def all_file_tokenizer():
+        global total_files, valid_files
+
         for file in files:
+            total_files += 1
             try:
                 yield tokenize_file(input_folder, file, only_ids)
+                valid_files += 1
             except:
-                pass
+                os.remove(os.path.join(input_folder, file))
 
     save_jsonl_gz(all_file_tokenizer(), os.path.join(output_folder, f"batch-{batch_number}.json.gz"))
     print(f"[WORKER{batch_number}] Finished tokenizing {len(files)} files")
+    print(f"Total files:\t{total_files}")
+    print(f"Valid files:\t{valid_files}")
 
 
 def main(input_folder: str, output_folder: str, only_ids: bool = False):

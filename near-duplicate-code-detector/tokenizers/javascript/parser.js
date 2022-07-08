@@ -1,6 +1,6 @@
 const {tokenize} = require('esprima');
 const {cpus} = require('os');
-const {access, readdir, mkdir, readFile} = require('fs/promises');
+const {access, readdir, mkdir, readFile, rm} = require('fs/promises');
 const {createWriteStream} = require('fs');
 const zlib = require('zlib');
 const path = require('path');
@@ -53,6 +53,9 @@ async function main() {
 const compareStrings = (a, b) => a > b ? 1 : b > a ? -1 : 0;
 
 async function handleFiles() {
+    let totalFiles = 0;
+    let validFiles = 0;
+
     const batchNumber = parseInt(process.env.BATCH_NUMBER);
     if (Number.isNaN(batchNumber)) {
         console.error(`Invalid batch number (${process.env.BATCH_NUMBER}). Worker was spawned incorrectly`)
@@ -108,12 +111,15 @@ async function handleFiles() {
         const fileCode = await readFile(filePath, 'utf8');
         try {
             writeStream();
+            totalFiles++;
             const tokens = tokenize(fileCode).map(token => token.value);
             const obj = {filename: path.relative(inputDir, filePath), tokens};
             gzip.write(JSON.stringify(obj))
             gzip.write('\n')
+            validFiles++;
         } catch (e) {
-            // If tokenization errors we can just skip the file
+            // If tokenization fails this file is invalid, so we remove it
+            await rm(filePath);
         }
     }
 
@@ -123,13 +129,11 @@ async function handleFiles() {
         await finished(write);
     }
 
-    console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files`)
+    console.log(`[WORKER${batchNumber}] Finished processing ${dirents.length} files. ${validFiles} / ${totalFiles} were valid.`)
 }
 
 if (cluster.isMaster) {
     main();
 } else {
-    handleFiles().then(() => {
-        process.exit(0);
-    });
+    handleFiles();
 }
