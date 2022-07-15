@@ -11,10 +11,11 @@ import os
 import json
 import random
 import numpy as np
+import csv
 
 
 def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct: float, seed: int):
-    if abs(1 - test_pct + train_pct + validation_pct) > 0.00001:
+    if abs(1 - (test_pct + train_pct + validation_pct)) > 0.00001:
         print(f"Train + test + validation must be equal to 1, but received {test_pct + train_pct + validation_pct}")
         exit(1)
 
@@ -39,14 +40,14 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
 
     for set_name in sets:
         repository_indices = np.where(choices == set_name)[0]
-        repository_names = list(files_by_repo.keys())[repository_indices]
-        file_names = [file_name for repo in repository_names for file_name in files_by_repo[repo]]
+        repository_names = np.array(list(files_by_repo.keys()))[repository_indices]
 
-        with open(os.path.join(dataset_folder, f'{set_name}-repositories.txt'), 'w') as f:
-            f.write('\n'.join(map(fix_repository_name, repository_names)))
-
-        with open(os.path.join(dataset_folder, f'{set_name}-files.txt'), 'w') as f:
-            f.write('\n'.join(file_names))
+        with open(os.path.join(dataset_folder, f'{set_name}.csv'), 'w') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Repository Name', 'File Name'])
+            for repo in repository_names:
+                for file_name in files_by_repo[repo]:
+                    writer.writerow([fix_repository_name(repo), file_name])
 
 
 def extract_repository_name(file_name: str) -> str:
