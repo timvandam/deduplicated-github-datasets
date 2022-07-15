@@ -35,22 +35,29 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
     choices = np.array(random.choices(['test', 'train', 'validation'], weights=[test_pct, train_pct, validation_pct],
                                       k=len(files_by_repo.keys())))
 
-    test = np.where(choices == 'test')[0]
-    train = np.where(choices == 'train')[0]
-    validation = np.where(choices == 'validation')[0]
+    sets = ['test', 'train', 'validation']
 
-    test_repos = list(files_by_repo.keys())[test]
-    train_repos = list(files_by_repo.keys())[train]
-    validation_repos = list(files_by_repo.keys())[validation]
+    for set_name in sets:
+        repository_indices = np.where(choices == set_name)[0]
+        repository_names = list(files_by_repo.keys())[repository_indices]
+        file_names = [file_name for repo in repository_names for file_name in files_by_repo[repo]]
 
-    test_files = [file_name for repo in test_repos for file_name in files_by_repo[repo]]
-    train_files = [file_name for repo in train_repos for file_name in files_by_repo[repo]]
-    validation_files = [file_name for repo in validation_repos for file_name in files_by_repo[repo]]
+        with open(os.path.join(dataset_folder, f'{set_name}-repositories.txt'), 'w') as f:
+            f.write('\n'.join(map(fix_repository_name, repository_names)))
+
+        with open(os.path.join(dataset_folder, f'{set_name}-files.txt'), 'w') as f:
+            f.write('\n'.join(file_names))
 
 
 def extract_repository_name(file_name: str) -> str:
     return file_name[:file_name.rindex("-")]
 
+
+def fix_repository_name(underscored_repository_name: str):
+    first_underscore = underscored_repository_name.index("_")
+    if first_underscore == -1:
+        raise Exception(f"Full repository name should have an underscore. Invalid: '{underscored_repository_name}'")
+    return underscored_repository_name[:first_underscore] + '/' + underscored_repository_name[first_underscore + 1:]
 
 if __name__ == '__main__':
     args = docopt(__doc__)
