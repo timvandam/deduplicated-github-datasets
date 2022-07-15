@@ -13,10 +13,9 @@ type CommandLineOption = {
 
 const DESCRIPTION = 'Create JavaScript or TypeScript line completion tasks';
 const OPTIONS: CommandLineOption[] = [
-    { name: 'files', optional: false, description: 'A path to a file containing the path to each file that should be used for the creation of line completion tasks' },
-    { name: 'output', optional: false, description: 'The path to where the output should be written. The output will be a json lines file.' },
+    { name: 'datasetFolder', optional: false, description: 'Folder for a dataset. Must contain ./sets/validation.csv and ./sets/test.csv' },
     { name: 'lineSplitRate', optional: true, defaultValue: '0.20', description: 'The rate of lines which should be used to create line completion tasks' },
-    { name: 'lineSplitCap', optional: true, defaultValue: '5', description: 'An upper bound on the amount of lines used to create lien completion tasks in a single file' },
+    { name: 'lineSplitCap', optional: true, defaultValue: '5', description: 'An upper bound on the amount of lines used to create line completion tasks in a single file' },
     { name: 'seed', optional: true, defaultValue: '42', description: 'An optional seed that is used to deterministically create line completion tasks' },
 ];
 
@@ -56,8 +55,7 @@ function getOptionDict(): Record<string, string> {
 }
 
 type Options = {
-    files: string;
-    output: string;
+    datasetFolder: string;
     lineSplitRate: number;
     lineSplitCap: number;
     seed: string;
@@ -67,25 +65,25 @@ async function getOptions(): Promise<Options> {
     const optionDict = getOptionDict();
 
     const options: Options = {
-        files: resolve(process.cwd(), optionDict.files),
-        output: resolve(process.cwd(), optionDict.output),
+        datasetFolder: resolve(process.cwd(), optionDict.datasetFolder),
         lineSplitRate: parseFloat(optionDict.lineSplitRate),
         lineSplitCap: parseInt(optionDict.lineSplitRate),
         seed: optionDict.seed,
     };
 
-    try {
-        await access(options.files);
-    } catch (e) {
-        console.error(`Can not access input file '${options.files}'. Are you sure it exists? Error: ${e}`);
-        process.exit(1);
-    }
-
-    try {
-        await mkdir(resolve(options.output, '../'), { recursive: true });
-    } catch (e) {
-        console.error(`Can not create output folder: ${e}`);
-        process.exit(1);
+    for (const path of [
+        options.datasetFolder,
+        resolve(options.datasetFolder, './sets'),
+        resolve(options.datasetFolder, './sets/validation.csv'),
+        resolve(options.datasetFolder, './sets/test.csv'),
+        resolve(options.datasetFolder, './repository-files'),
+    ]) {
+        try {
+            await access(path);
+        } catch (e) {
+            console.error(`Can not access '${path}'. Are you sure it exists? Error: ${e}`);
+            process.exit(1);
+        }
     }
 
     return options;
@@ -108,59 +106,62 @@ async function main() {
     const options = await getOptions();
 
     const random = create(options.seed);
-    const readStream = createReadStream(options.files);
-    const lineStream = createInterface({ input: readStream, crlfDelay: Infinity });
-    const writeStream = createWriteStream(options.output);
 
-    const lineIterator = lineStream[Symbol.asyncIterator]();
-    await lineIterator.next();
-    for await (const line of lineIterator) {
-        if (!line.length) continue;
-        const [repository, file] = line.split(',');
-        const filePath = resolve(options.files, '../repository-files', file);
-        const fileContent = await readFile(filePath, 'utf8');
-        const lines = fileContent.split('\n');
-        const nonEmptyLineIndices = Array
-            .from({ length: lines.length }, (_, i) => i)
-            .filter(i => lines[i].trim().length !== 0);
+    for (const setName of ['validation', 'test']) {
+        const readStream = createReadStream(resolve(options.datasetFolder, `./sets/${setName}.csv`));
+        const lineStream = createInterface({ input: readStream, crlfDelay: Infinity });
+        const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/${setName}.jsonl`));
 
-        if (nonEmptyLineIndices.length === 0) {
-            continue;
+        const lineIterator = lineStream[Symbol.asyncIterator]();
+        await lineIterator.next();
+        for await (const line of lineIterator) {
+            if (!line.length) continue;
+            const [repository, file] = line.split(',');
+            const filePath = resolve(options.datasetFolder, './repository-files', file);
+            const fileContent = await readFile(filePath, 'utf8');
+            const lines = fileContent.split('\n');
+            const nonEmptyLineIndices = Array
+                .from({length: lines.length}, (_, i) => i)
+                .filter(i => lines[i].trim().length !== 0);
+
+            if (nonEmptyLineIndices.length === 0) {
+                continue;
+            }
+
+            const selectedLineCount = Math.max(1, Math.min(options.lineSplitCap, Math.floor(options.lineSplitRate * nonEmptyLineIndices.length)));
+
+            const selectedLineIndices: number[] = [];
+            for (let i = 0; i < selectedLineCount; i++) {
+                const index = random.intBetween(0, nonEmptyLineIndices.length - 1);
+                selectedLineIndices.push(nonEmptyLineIndices[index]);
+                nonEmptyLineIndices.splice(index, 1);
+            }
+
+            const splits: [lineIndex: number, start: number][] = [];
+            for (const lineIndex of selectedLineIndices) {
+                const possibleStarts = Array
+                    .from({length: lines[lineIndex].length}, (_, i) => i)
+                    .filter(i => i < lines[lineIndex].length && lines[lineIndex].charAt(i) !== ' ');
+                const start = possibleStarts[random.intBetween(0, possibleStarts.length - 1)];
+                splits.push([lineIndex, start]);
+            }
+
+            for (const [lineIndex, start] of splits) {
+                let leftContext = lines.slice(0, lineIndex).join('\n');
+                if (lineIndex > 0) leftContext += '\n';
+                leftContext += lines[lineIndex].slice(0, start);
+
+                const groundTruth = lines[lineIndex].slice(start).trim();
+                const rightContext = lines.slice(lineIndex + 1).join('\n');
+
+                const output: Output = {leftContext, groundTruth, rightContext};
+                const json = JSON.stringify(output);
+                writeStream.write(json);
+                writeStream.write('\n');
+            }
         }
 
-        const selectedLineCount = Math.max(1, Math.min(options.lineSplitCap, Math.floor(options.lineSplitRate * nonEmptyLineIndices.length)));
-
-        const selectedLineIndices: number[] = [];
-        for (let i = 0; i < selectedLineCount; i++) {
-            const index = random.intBetween(0, nonEmptyLineIndices.length - 1);
-            selectedLineIndices.push(nonEmptyLineIndices[index]);
-            nonEmptyLineIndices.splice(index, 1);
-        }
-
-        const splits: [lineIndex: number, start: number][] = [];
-        for (const lineIndex of selectedLineIndices) {
-            const possibleStarts = Array
-                .from({ length: lines[lineIndex].length }, (_, i) => i)
-                .filter(i => i < lines[lineIndex].length && lines[lineIndex].charAt(i) !== ' ');
-            const start = possibleStarts[random.intBetween(0, possibleStarts.length - 1)];
-            splits.push([lineIndex, start]);
-        }
-
-        for (const [lineIndex, start] of splits) {
-            let leftContext = lines.slice(0, lineIndex).join('\n');
-            if (lineIndex > 0) leftContext += '\n';
-            leftContext += lines[lineIndex].slice(0, start);
-
-            const groundTruth = lines[lineIndex].slice(start).trim();
-            const rightContext = lines.slice(lineIndex + 1).join('\n');
-
-            const output: Output = { leftContext, groundTruth, rightContext };
-            const json = JSON.stringify(output);
-            writeStream.write(json);
-            writeStream.write('\n');
-        }
+        writeStream.end();
     }
-
-    writeStream.end();
 }
 

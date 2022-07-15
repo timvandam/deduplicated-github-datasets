@@ -42,7 +42,7 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
         repository_indices = np.where(choices == set_name)[0]
         repository_names = np.array(list(files_by_repo.keys()))[repository_indices]
 
-        with open(os.path.join(dataset_folder, f'{set_name}.csv'), 'w') as f:
+        with open(os.path.join(dataset_folder, './sets', f'{set_name}.csv'), 'w') as f:
             writer = csv.writer(f)
             writer.writerow(['Repository Name', 'File Name'])
             for repo in repository_names:
