@@ -128,6 +128,8 @@ namespace NearCloneDetector
 
         private IEnumerable<(string File1, string File2, double JaccardSimilarity, double KeyJacardSimilarity)> FindNearDuplicates(double keyJaccardThreshold, double jaccardThreshold, string project1, string project2, int comparisonIndex, int totalComparisons)
         {
+            Console.WriteLine($"Started batch {comparisonIndex} / {totalComparisons}");
+            
             var result = _index[project1].AsParallel().Where(f => !_alreadyDuplicatedFiles.ContainsKey(f.Key)).SelectMany(fileInProject1 =>
             {
                 IEnumerable<(string File1, string File2, double JaccardSimilarity, double KeyJacardSimilarity)> ComputeSimilarity()
@@ -151,8 +153,6 @@ namespace NearCloneDetector
                 }
                 return ComputeSimilarity();
             });
-        
-            Console.WriteLine($"Finished batch {comparisonIndex} / {totalComparisons}");
             return result;
         }
     }
