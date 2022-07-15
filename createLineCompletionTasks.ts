@@ -3,7 +3,6 @@ import { create } from 'random-seed';
 import { access, readFile, mkdir } from 'fs/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import { createInterface } from 'readline';
-import tokenize, { Token } from 'js-tokens';
 
 type CommandLineOption = {
     name: string;
@@ -78,18 +77,24 @@ async function getOptions(): Promise<Options> {
     try {
         await access(options.files);
     } catch (e) {
-        console.error(`Can not access input file '${options.files}'. Are you sure it exists? Error: ${e.message}`);
+        console.error(`Can not access input file '${options.files}'. Are you sure it exists? Error: ${e}`);
         process.exit(1);
     }
 
     try {
         await mkdir(resolve(options.output, '../'), { recursive: true });
     } catch (e) {
-        console.error(`Can not create output folder: ${e.message}`);
+        console.error(`Can not create output folder: ${e}`);
         process.exit(1);
     }
 
     return options;
+}
+
+type Output = {
+    leftContext: string;
+    groundTruth: string;
+    rightContext: string;
 }
 
 if (argv.length === 0) {
@@ -107,32 +112,52 @@ async function main() {
     const lineStream = createInterface({ input: readStream, crlfDelay: Infinity });
     const writeStream = createWriteStream(options.output);
 
-    for await (const file of lineStream) {
+    const lineIterator = lineStream[Symbol.asyncIterator]();
+    await lineIterator.next();
+    for await (const line of lineIterator) {
+        const [repository, file] = line.split(',');
         const filePath = resolve(options.files, '../repository-files', file);
         const fileContent = await readFile(filePath, 'utf8');
-        try {
-            const tokens = tokenize(fileContent);
-            const tokensPerLine: Token[][] = [];
-            const currentLine: Token[] = [];
-            for (const token of tokens) {
-                if (token.type === 'LineTerminatorSequence') {
-                    tokensPerLine.push(currentLine);
-                    currentLine.length = 0;
-                } else {
-                    currentLine.push(token);
-                }
-            }
-            tokensPerLine.push(currentLine);
+        const lines = fileContent.split('\n');
+        const nonEmptyLineIndices = Array
+            .from({ length: lines.length }, (_, i) => i)
+            .filter(i => lines[i].trim().length !== 0);
 
-            const nonEmptyLineCount = tokensPerLine
-                .map((line) => line.filter(token => token.type !== 'WhiteSpace'))
-                .reduce((count, line) => count + (line.length > 0 ? 1 : 0), 0)
-            const linesToSelect = Math.max(1, Math.min(options.lineSplitCap, Math.floor(nonEmptyLineCount * options.lineSplitRate)));
-            // TODO: Select lines
-        } catch (e) {
-            console.warn(`Encountered a file that can not be tokenized (${file}). This file should have been removed earlier but will be ignored.`);
+        if (nonEmptyLineIndices.length === 0) {
+            continue;
+        }
+
+        const selectedLineCount = Math.max(1, Math.min(options.lineSplitCap, Math.floor(options.lineSplitRate * nonEmptyLineIndices.length)));
+
+        const selectedLineIndices: number[] = [];
+        for (let i = 0; i < selectedLineCount; i++) {
+            const index = random.intBetween(0, nonEmptyLineIndices.length - 1);
+            selectedLineIndices.push(nonEmptyLineIndices[index]);
+            nonEmptyLineIndices.splice(index, 1);
+        }
+
+        const splits: [lineIndex: number, start: number][] = [];
+        for (const lineIndex of selectedLineIndices) {
+            const possibleStarts = Array
+                .from({ length: lines[lineIndex].length }, (_, i) => i)
+                .filter(i => i < lines[lineIndex].length && lines[lineIndex].charAt(i) !== ' ');
+            const start = possibleStarts[random.intBetween(0, possibleStarts.length - 1)];
+            splits.push([lineIndex, start]);
+        }
+
+        for (const [lineIndex, start] of splits) {
+            let leftContext = lines.slice(0, lineIndex).join('\n');
+            if (lineIndex > 0) leftContext += '\n';
+            leftContext += lines[lineIndex].slice(0, start);
+
+            const groundTruth = lines[lineIndex].slice(start).trim();
+            const rightContext = lines.slice(lineIndex + 1).join('\n');
+
+            const output: Output = { leftContext, groundTruth, rightContext };
+            const json = JSON.stringify(output);
+            writeStream.write(json);
+            writeStream.write('\n');
         }
     }
-
 }
 
