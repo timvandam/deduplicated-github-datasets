@@ -14,7 +14,7 @@ import numpy as np
 
 
 def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct: float, seed: int):
-    if test_pct + train_pct + validation_pct != 1:
+    if abs(1 - test_pct + train_pct + validation_pct) > 0.00001:
         print(f"Train + test + validation must be equal to 1, but received {test_pct + train_pct + validation_pct}")
         exit(1)
 
@@ -22,8 +22,8 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
 
     files_by_repo: Dict[str, List[str]] = {}
 
-    for file_name in os.listdir(dataset_folder):
-        if not os.path.isfile(os.path.join(dataset_folder, file_name)):
+    for file_name in os.listdir(os.path.join(dataset_folder, 'repository-files')):
+        if not os.path.isfile(os.path.join(dataset_folder, 'repository-files', file_name)):
             continue
 
         repo_name = extract_repository_name(file_name)
@@ -61,4 +61,4 @@ def fix_repository_name(underscored_repository_name: str):
 
 if __name__ == '__main__':
     args = docopt(__doc__)
-    main(args['DATASET_FOLDER'], args['TEST_PCT'], args['TRAIN_PCT'], args['VALIDATION_PCT'], int(args['SEED'] or 42))
+    main(args['DATASET_FOLDER'], float(args['TEST_PCT']), float(args['TRAIN_PCT']), float(args['VALIDATION_PCT']), int(args['SEED'] or 42))
