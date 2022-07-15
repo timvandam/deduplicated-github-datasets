@@ -110,6 +110,7 @@ async function main() {
     for (const setName of ['validation', 'test']) {
         const readStream = createReadStream(resolve(options.datasetFolder, `./sets/${setName}.csv`));
         const lineStream = createInterface({ input: readStream, crlfDelay: Infinity });
+        await mkdir(resolve(options.datasetFolder, './datasets'));
         const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/${setName}.jsonl`));
 
         const lineIterator = lineStream[Symbol.asyncIterator]();
