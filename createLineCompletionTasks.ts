@@ -159,5 +159,7 @@ async function main() {
             writeStream.write('\n');
         }
     }
+
+    writeStream.end();
 }
 
