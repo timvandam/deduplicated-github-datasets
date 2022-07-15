@@ -135,5 +135,5 @@ async function handleFiles() {
 if (cluster.isMaster) {
     main();
 } else {
-    handleFiles();
+    handleFiles().then(() => process.exit(0));
 }
