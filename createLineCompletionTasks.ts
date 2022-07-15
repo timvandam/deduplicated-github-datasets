@@ -115,6 +115,7 @@ async function main() {
     const lineIterator = lineStream[Symbol.asyncIterator]();
     await lineIterator.next();
     for await (const line of lineIterator) {
+        if (!line.length) continue;
         const [repository, file] = line.split(',');
         const filePath = resolve(options.files, '../repository-files', file);
         const fileContent = await readFile(filePath, 'utf8');
