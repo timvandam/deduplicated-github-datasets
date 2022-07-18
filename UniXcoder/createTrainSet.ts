@@ -1,15 +1,14 @@
 /**
- * Create a train set file to be consumed by UniXcoder when fine-tuning..
+ * Create a train set file to be consumed by UniXcoder when fine-tuning.
  */
 
 import { cli } from "../utils/cli";
 import { resolve } from "path";
 import { access, mkdir } from "fs/promises";
 import { createReadLineStream } from "../utils/createReadLineStream";
-import { createReadStream, createWriteStream } from "fs";
+import { createWriteStream } from "fs";
 import { drop } from "../utils/asyncIteration";
-import { finished } from 'stream/promises';
-import replaceStream from 'replacestream';
+import { pipeline } from 'stream/promises';
 
 type Options = {
     datasetFolder: string;
@@ -45,6 +44,18 @@ async function getOptions(): Promise<Options> {
     return options;
 }
 
+async function* processLines(lines: AsyncIterableIterator<string>): AsyncIterable<string> {
+    yield '<s> '; // start of sequence
+
+    for await (const line of lines) {
+        yield line; // segment
+        yield ' </s>'; // end of segment
+    }
+
+    yield ' </s>'; // end of sequence
+    yield '\n';
+}
+
 async function main() {
     const options = await getOptions();
 
@@ -54,9 +65,12 @@ async function main() {
 
     for await (const line of drop(1, lineStream)) {
         const [repository, file] = line.split(',');
-        const readStream = createReadStream(resolve(options.datasetFolder, './repository-files', file))
-            .pipe(replaceStream(/[\n\r]+/g, '<EOL>'));
-        await finished(readStream.pipe(writeStream, { end: false }))
+        writeStream.write('<s> ');
+        await pipeline(
+            createReadLineStream(resolve(options.datasetFolder, './repository-files', file)),
+            processLines,
+            writeStream,
+        );
     }
 
     writeStream.end();
