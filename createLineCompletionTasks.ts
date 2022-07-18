@@ -1,58 +1,10 @@
-import { relative, resolve } from 'path';
+import { resolve } from 'path';
 import { create } from 'random-seed';
 import { access, readFile, mkdir } from 'fs/promises';
-import { createReadStream, createWriteStream } from 'fs';
-import { createInterface } from 'readline';
-
-type CommandLineOption = {
-    name: string;
-    optional: boolean;
-    defaultValue?: string;
-    description: string;
-}
-
-const DESCRIPTION = 'Create JavaScript or TypeScript line completion tasks';
-const OPTIONS: CommandLineOption[] = [
-    { name: 'datasetFolder', optional: false, description: 'Folder for a dataset. Must contain ./sets/validation.csv and ./sets/test.csv' },
-    { name: 'lineSplitRate', optional: true, defaultValue: '0.20', description: 'The rate of lines which should be used to create line completion tasks' },
-    { name: 'lineSplitCap', optional: true, defaultValue: '5', description: 'An upper bound on the amount of lines used to create line completion tasks in a single file' },
-    { name: 'seed', optional: true, defaultValue: '42', description: 'An optional seed that is used to deterministically create line completion tasks' },
-];
-
-// put all optionals at the end (stable wrt OPTIONS array)
-let end = OPTIONS.length;
-for (let i = 0; i < end; i++) {
-    if (OPTIONS[i].optional) {
-        OPTIONS.push(OPTIONS.splice(i, 1)[0]);
-        i--;
-        end--;
-    }
-}
-
-const USAGE = `./node_modules/.bin/ts-node ./${relative(process.cwd(), __filename)} ${OPTIONS.map(({ name, optional }) => optional ? `[${name}]` : name).join(' ')}`;
-const LONGEST_COMMAND_LENGTH = OPTIONS.map(({ name }) => name.length).reduce((a, b) => Math.max(a, b), 0);
-const OPTIONS_DESCRIPTIONS = 'Options:' + '\n' + OPTIONS.map(({ name, description, defaultValue }) => `\t${name.padEnd(LONGEST_COMMAND_LENGTH, ' ')}\t\t${description}` + (defaultValue !== undefined ? ` (default: ${defaultValue})` : '')).join('\n');
-const PROGRAM_HELP = DESCRIPTION + '\n\nUsage:\n\t' + USAGE + '\n\n' + OPTIONS_DESCRIPTIONS;
-
-const argv = process.argv.slice(2);
-
-function getOptionDict(): Record<string, string> {
-    const options: Record<string, string> = {};
-
-    for (let i = 0; i < OPTIONS.length; i++) {
-        const { name, optional, defaultValue } = OPTIONS[i];
-        const arg: string | undefined = argv[i];
-
-        if (!optional && arg === undefined) {
-            console.error(`You did not provide a value for the mandatory option '${name}'`);
-            process.exit(1);
-        }
-
-        options[name] = arg ?? defaultValue;
-    }
-
-    return options;
-}
+import { createWriteStream } from 'fs';
+import { createReadLineStream } from "./utils/createReadLineStream";
+import { drop } from "./utils/asyncIteration";
+import {cli} from "./utils/cli";
 
 type Options = {
     datasetFolder: string;
@@ -62,13 +14,22 @@ type Options = {
 };
 
 async function getOptions(): Promise<Options> {
-    const optionDict = getOptionDict();
+    const rawOptions = cli(
+        'Create JavaScript or TypeScript line completion tasks',
+        [
+            { name: 'datasetFolder', optional: false, description: 'Folder for a dataset. Must contain ./sets/validation.csv and ./sets/test.csv' },
+            { name: 'lineSplitRate', optional: true, defaultValue: '0.20', description: 'The rate of lines which should be used to create line completion tasks' },
+            { name: 'lineSplitCap', optional: true, defaultValue: '5', description: 'An upper bound on the amount of lines used to create line completion tasks in a single file' },
+            { name: 'seed', optional: true, defaultValue: '42', description: 'An optional seed that is used to deterministically create line completion tasks' },
+        ],
+        __filename,
+    )
 
     const options: Options = {
-        datasetFolder: resolve(process.cwd(), optionDict.datasetFolder),
-        lineSplitRate: parseFloat(optionDict.lineSplitRate),
-        lineSplitCap: parseInt(optionDict.lineSplitRate),
-        seed: optionDict.seed,
+        datasetFolder: resolve(process.cwd(), rawOptions.datasetFolder),
+        lineSplitRate: parseFloat(rawOptions.lineSplitRate),
+        lineSplitCap: parseInt(rawOptions.lineSplitRate),
+        seed: rawOptions.seed,
     };
 
     for (const path of [
@@ -95,28 +56,17 @@ type Output = {
     rightContext: string;
 }
 
-if (argv.length === 0) {
-    console.log(PROGRAM_HELP);
-    process.exit(0);
-} else {
-    main().then(() => process.exit(0));
-}
-
 async function main() {
     const options = await getOptions();
 
     const random = create(options.seed);
 
     for (const setName of ['validation', 'test']) {
-        const readStream = createReadStream(resolve(options.datasetFolder, `./sets/${setName}.csv`));
-        const lineStream = createInterface({ input: readStream, crlfDelay: Infinity });
+        const lineStream = createReadLineStream(resolve(options.datasetFolder, `./sets/${setName}.csv`));
         await mkdir(resolve(options.datasetFolder, './datasets'), { recursive: true });
         const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/${setName}.jsonl`));
 
-        const lineIterator = lineStream[Symbol.asyncIterator]();
-        await lineIterator.next();
-        for await (const line of lineIterator) {
-            if (!line.length) continue;
+        for await (const line of drop(1, lineStream)) {
             const [repository, file] = line.split(',');
             const filePath = resolve(options.datasetFolder, './repository-files', file);
             const fileContent = await readFile(filePath, 'utf8');
