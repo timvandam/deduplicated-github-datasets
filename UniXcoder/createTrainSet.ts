@@ -44,12 +44,12 @@ async function getOptions(): Promise<Options> {
     return options;
 }
 
-async function* processLines(lines: AsyncIterableIterator<string>): AsyncIterable<string> {
+async function* processLines(lines: AsyncIterable<string>): AsyncIterable<string> {
     yield '<s> '; // start of sequence
 
     for await (const line of lines) {
         yield line; // segment
-        yield ' </s>'; // end of segment
+        yield ' </s> '; // end of segment
     }
 
     yield ' </s>'; // end of sequence
