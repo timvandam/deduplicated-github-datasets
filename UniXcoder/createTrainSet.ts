@@ -61,7 +61,7 @@ async function main() {
 
     const lineStream = createReadLineStream(resolve(options.datasetFolder, './sets/train.csv'));
     await mkdir(resolve(options.datasetFolder, './datasets'), { recursive: true });
-    const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/train.txt`))
+    const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/train.csv`))
 
     for await (const line of drop(1, lineStream)) {
         const [repository, file] = line.split(',');
