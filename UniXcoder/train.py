@@ -128,10 +128,10 @@ def read_validation_examples(dataset_folder: str):
 
             example = json.loads(line)
 
-            # replace \n with </s>, remove leading <s>, normalize spacing
+            # replace \n with </s>, normalize spacing
             left_context = example["leftContext"]
             left_context = left_context.replace("\n", " </s> ") + " </s>"
-            left_context = left_context.split()[1:]
+            left_context = left_context.split()
             left_context = " ".join(left_context)
 
             examples.append({
@@ -144,17 +144,16 @@ def read_validation_examples(dataset_folder: str):
 
 def tokenize(item):
     i, example, max_length, tokenizer = item
-    print("Line", i+1)
     source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
     source_tokens = ["<s>", "<decoder-only>", "</s>"] + source_tokens[-(max_length - 3):]
     source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
     padding_length = max_length - len(source_ids)
     source_ids += [tokenizer.pad_token_id] * padding_length
 
-    # if i < 5:
-    #     print(f"Example {i}")
-    #     print(f"Source Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
-    #     print(f"Source IDs: {' '.join(map(str, source_ids))}")
+    if i < 5:
+        print(f"*** Example {i} ***")
+        print(f"\tSource Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
+        print(f"\tSource IDs: {' '.join(map(str, source_ids))}")
 
     return source_ids
 
@@ -163,14 +162,14 @@ def examples_to_features(examples: List[str], tokenizer: RobertaTokenizer, max_l
     pool = multiprocessing.Pool(max(1, int(os.cpu_count() * 0.8)))
 
     sources = [(i, example, max_length, tokenizer) for i, example in enumerate(examples)]
-    print("*** Examples ***")
-    # features = pool.map(
-    #     tokenize,
-    #     tqdm(sources, total=len(sources)),
-    # )
+    features = tqdm(pool.imap_unordered(
+        tokenize,
+        sources,
+        chunksize=100,
+    ), total=len(sources))
     # features = [(print(x), tokenize(x))[1] for x in tqdm(sources, total=len(sources))]
 
-    return features
+    return list(features)
 
 
 def main(
@@ -238,11 +237,10 @@ def main(
     )
 
     print("***** Running Training *****")
-    print("  Num examples = %d", len(train_examples))
-    print("  Num Epochs = %d", num_epochs)
-    print("  Batch size = %d", batch_size)
-    print("  Steps per epoch = %d", len(train_examples) // batch_size)
-    print("  Total optimization steps = %d", len(train_dataloader) * num_epochs)
+    print("\tNum examples = %d" % len(train_examples))
+    print("\tNum Epochs = %d" % num_epochs)
+    print("\tBatch size = %d" % batch_size)
+    print("\tSteps per epoch = %d" % (len(train_examples) // batch_size))
 
     # this is all copied from the unixcoder code
     model.train()
@@ -278,7 +276,7 @@ def main(
         nb_tr_examples, nb_tr_steps = 0, 0
 
         print("***** Running Validation *****")
-        print("  Num examples = %d" % len(validation_examples))
+        print("\tNum examples = %d" % len(validation_examples))
 
         model.eval()
         all_source_ids = torch.tensor(validation_features, dtype=torch.long)
