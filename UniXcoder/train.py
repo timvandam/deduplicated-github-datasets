@@ -128,7 +128,7 @@ def read_validation_examples(dataset_folder: str):
             example = json.loads(line)
 
             # replace \n with </s>, remove leading <s>, normalize spacing
-            left_context = example["left_context"]
+            left_context = example["leftContext"]
             left_context = left_context.replace("\n", " </s> ") + " </s>"
             left_context = left_context.split()[1:]
             left_context = " ".join(left_context)
