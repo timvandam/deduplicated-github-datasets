@@ -1,10 +1,8 @@
 export async function* drop<T>(amount: number, it: AsyncIterable<T>): AsyncIterable<T> {
-    if (amount <= 0) yield* it;
-
-    let i = 0;
-    for await (const _ of it) {
-        i++;
-        if (i >= amount) break;
+    const iterator = it[Symbol.asyncIterator]();
+    while (true) {
+        if (amount <= 0 || (await iterator.next()).done) break;
+        amount--;
     }
 
     yield* it;
@@ -14,13 +12,14 @@ export async function* zip<A, B>(a: AsyncIterable<A>, b: AsyncIterable<B>): Asyn
     const aIterator = a[Symbol.asyncIterator]();
     const bIterator = b[Symbol.asyncIterator]();
 
-    let aValue = await aIterator.next();
-    let bValue = await bIterator.next();
+    let aValue;
+    let bValue;
 
-    while (!aValue.done && !bValue.done) {
-        yield [aValue.value, bValue.value];
+    while (true) {
         aValue = await aIterator.next();
         bValue = await bIterator.next();
+        if (aValue.done || bValue.done) break;
+        yield [aValue.value, bValue.value];
     }
 }
 
