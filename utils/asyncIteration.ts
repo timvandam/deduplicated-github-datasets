@@ -5,7 +5,10 @@ export async function* drop<T>(amount: number, it: AsyncIterable<T>): AsyncItera
         amount--;
     }
 
-    yield* it;
+    let result: IteratorResult<T>;
+    while (!(result = await iterator.next()).done) {
+        yield result.value;
+    }
 }
 
 export async function* zip<A, B>(a: AsyncIterable<A>, b: AsyncIterable<B>): AsyncIterable<[A, B]> {
