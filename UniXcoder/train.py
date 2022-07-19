@@ -107,7 +107,7 @@ def prepare_model(model_name: str, max_input_length: int, beam_size: int):
 def read_train_examples(dataset_folder: str):
     train_file_path = get_train_file_path(dataset_folder)
 
-    with open(train_file_path, "r") as f:
+    with open(train_file_path, "r", encoding="utf-8") as f:
         examples = [
             " ".join(line.strip().split()[1:])
             for line in f
@@ -121,10 +121,11 @@ def read_validation_examples(dataset_folder: str):
     validation_file_path = get_validation_file_path(dataset_folder)
 
     examples = []
-    with open(validation_file_path, "r") as f:
+    with open(validation_file_path, "r", encoding="utf-8") as f:
         for line in f:
             if len(line.strip()) == 0:
                 continue
+
             example = json.loads(line)
 
             # replace \n with </s>, remove leading <s>, normalize spacing
@@ -143,16 +144,17 @@ def read_validation_examples(dataset_folder: str):
 
 def tokenize(item):
     i, example, max_length, tokenizer = item
+    print("Line", i+1)
     source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
     source_tokens = ["<s>", "<decoder-only>", "</s>"] + source_tokens[-(max_length - 3):]
     source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
     padding_length = max_length - len(source_ids)
     source_ids += [tokenizer.pad_token_id] * padding_length
 
-    if i < 5:
-        print(f"Example {i}")
-        print(f"Source Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
-        print(f"Source IDs: {' '.join(map(str, source_ids))}")
+    # if i < 5:
+    #     print(f"Example {i}")
+    #     print(f"Source Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
+    #     print(f"Source IDs: {' '.join(map(str, source_ids))}")
 
     return source_ids
 
@@ -162,10 +164,11 @@ def examples_to_features(examples: List[str], tokenizer: RobertaTokenizer, max_l
 
     sources = [(i, example, max_length, tokenizer) for i, example in enumerate(examples)]
     print("*** Examples ***")
-    features = pool.map(
-        tokenize,
-        tqdm(sources, total=len(sources)),
-    )
+    # features = pool.map(
+    #     tokenize,
+    #     tqdm(sources, total=len(sources)),
+    # )
+    # features = [(print(x), tokenize(x))[1] for x in tqdm(sources, total=len(sources))]
 
     return features
 
@@ -200,6 +203,11 @@ def main(
         device = torch.device("cpu")
         model = model.to(device)
 
+    print("Loading validation examples")
+    validation_examples = read_validation_examples(dataset_folder)
+    validation_features = examples_to_features([x["input"] for x in validation_examples], tokenizer, max_input_length)
+    print("Read validation examples")
+
     print("Loading training examples")
     train_examples = read_train_examples(dataset_folder)
     # TODO: Windowed approach if the example is too big!!!
@@ -211,10 +219,6 @@ def main(
         sampler=train_sampler,
         batch_size=batch_size // gradient_accumulation_steps
     )
-
-    print("Loading validation examples")
-    validation_examples = read_validation_examples(dataset_folder)
-    validation_features = examples_to_features([x["output"] for x in validation_examples], tokenizer, max_input_length)
 
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
@@ -327,7 +331,7 @@ def main(
         model_name = f"epoch-{epoch}-acc-{validation_accuracy*100:.3f}"
         torch.save(model_to_save.state_dict(), get_model_file_path(dataset_folder, model_name))
         if best_model:
-            with open(get_model_file_path(dataset_folder, "best_model"), "w") as f:
+            with open(get_model_file_path(dataset_folder, "best_model"), "w", encoding="utf-8") as f:
                 f.write(model_name)
 
 
