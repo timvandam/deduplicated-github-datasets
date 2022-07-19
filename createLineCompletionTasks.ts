@@ -4,7 +4,9 @@ import { access, readFile, mkdir } from 'fs/promises';
 import { createWriteStream } from 'fs';
 import { createReadLineStream } from "./utils/createReadLineStream";
 import { drop } from "./utils/asyncIteration";
-import {cli} from "./utils/cli";
+import { cli } from "./utils/cli";
+import { createTable } from 'nice-table';
+import { inspect } from 'util';
 
 type Options = {
     datasetFolder: string;
@@ -28,9 +30,17 @@ async function getOptions(): Promise<Options> {
     const options: Options = {
         datasetFolder: resolve(process.cwd(), rawOptions.datasetFolder),
         lineSplitRate: parseFloat(rawOptions.lineSplitRate),
-        lineSplitCap: parseInt(rawOptions.lineSplitRate),
+        lineSplitCap: parseInt(rawOptions.lineSplitCap),
         seed: rawOptions.seed,
     };
+
+    if (options.lineSplitRate < 0 || options.lineSplitRate > 1) {
+        throw new Error(`lineSplitRate must be between 0 and 1, but was ${options.lineSplitRate}`);
+    }
+
+    if (options.lineSplitCap < 1) {
+        throw new Error(`lineSplitCap must be at least 1, but was ${options.lineSplitCap}`);
+    }
 
     for (const path of [
         options.datasetFolder,
@@ -61,13 +71,23 @@ async function main() {
 
     const random = create(options.seed);
 
+    type Statistic = {
+        set: string;
+        fileCount: number;
+        taskCount: number;
+    };
+    const statistics: Statistic[] = [];
+
     for (const setName of ['validation', 'test']) {
+        let fileCount = 0;
+        let taskCount = 0;
         const lineStream = createReadLineStream(resolve(options.datasetFolder, `./sets/${setName}.csv`));
         await mkdir(resolve(options.datasetFolder, './datasets'), { recursive: true });
         const writeStream = createWriteStream(resolve(options.datasetFolder, `./datasets/${setName}.jsonl`));
 
         for await (const line of drop(1, lineStream)) {
             const [repository, file] = line.split(',');
+            fileCount++;
             const filePath = resolve(options.datasetFolder, './repository-files', file);
             const fileContent = await readFile(filePath, 'utf8');
             const lines = fileContent.split('\n');
@@ -97,6 +117,7 @@ async function main() {
                 splits.push([lineIndex, start]);
             }
 
+            taskCount += splits.length;
             for (const [lineIndex, start] of splits) {
                 let leftContext = lines.slice(0, lineIndex).join('\n');
                 if (lineIndex > 0) leftContext += '\n';
@@ -112,7 +133,14 @@ async function main() {
             }
         }
 
+        statistics.push({ set: setName, fileCount, taskCount })
         writeStream.end();
     }
+
+    console.log(createTable(statistics, ['set', 'fileCount', 'taskCount'], {
+        maxWidth: process.stdout.columns,
+        stringify: (value: unknown) => inspect(value, { colors: true }).replace(/'/g, '')
+    }));
 }
 
+main();

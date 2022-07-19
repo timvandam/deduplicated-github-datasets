@@ -23,6 +23,7 @@
     "typescript": "^4.7.4"
   },
   "dependencies": {
+    "nice-table": "^1.1.0",
     "random-seed": "^0.3.0"
   }
 }
