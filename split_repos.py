@@ -5,13 +5,19 @@ Usage:
    split_repos.py DATASET_FOLDER TEST_PCT TRAIN_PCT VALIDATION_PCT [SEED]
 """
 
-from typing import Set, List, Dict
+from typing import Set, List, Dict, TypeVar
 from docopt import docopt
 import os
 import json
 import random
 import numpy as np
 import csv
+
+# pick `k` items from a numpy array randomly and remove them
+def pick_random(l, k):
+    indices = random.sample(range(len(l)), k=k)
+    picked = l[indices]
+    return picked, np.delete(l, indices, axis=0)
 
 
 def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct: float, seed: int):
@@ -33,15 +39,24 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
 
         files_by_repo[repo_name].append(file_name)
 
-    choices = np.array(random.choices(['test', 'train', 'validation'], weights=[test_pct, train_pct, validation_pct],
-                                      k=len(files_by_repo.keys())))
+    choices = np.array(list(files_by_repo.keys()))
 
-    sets = ['test', 'train', 'validation']
+    print(f"Splitting {len(choices)} repositories according to a {test_pct}/{train_pct}/{validation_pct} split")
 
-    for set_name in sets:
-        repository_indices = np.where(choices == set_name)[0]
-        repository_names = np.array(list(files_by_repo.keys()))[repository_indices]
+    test_repo_count = int(test_pct * len(choices))
+    validation_repo_count = int(validation_pct * len(choices))
+    train_repo_count = len(choices) - test_repo_count - validation_repo_count
 
+    set_repositories = {}
+    set_repositories["test"], choices = pick_random(choices, test_repo_count)
+    set_repositories["validation"], choices = pick_random(choices, validation_repo_count)
+    set_repositories["train"], choices = pick_random(choices, train_repo_count)
+
+    if len(choices) > 0:
+        print(f"{len(choices)} repositories were not used. This should be 0 after creating the sets.")
+        exit(1)
+
+    for set_name, repository_names in set_repositories.items():
         path = os.path.join(dataset_folder, './sets', f'{set_name}.csv')
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
@@ -50,6 +65,7 @@ def main(dataset_folder: str, test_pct: float, train_pct: float, validation_pct:
             for repo in repository_names:
                 for file_name in files_by_repo[repo]:
                     writer.writerow([fix_repository_name(repo), file_name])
+        print(f"Created {set_name}.csv with {len(repository_names)} repositories")
 
 
 def extract_repository_name(file_name: str) -> str:
