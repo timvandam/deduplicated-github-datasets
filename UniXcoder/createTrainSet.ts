@@ -8,7 +8,7 @@ import { access, mkdir } from "fs/promises";
 import { createReadLineStream } from "../utils/createReadLineStream";
 import { createWriteStream } from "fs";
 import { drop } from "../utils/asyncIteration";
-import { pipeline } from 'stream/promises';
+import { once } from 'events';
 
 type Options = {
     datasetFolder: string;
@@ -65,12 +65,13 @@ async function main() {
 
     for await (const line of drop(1, lineStream)) {
         const [repository, file] = line.split(',');
-        writeStream.write('<s> ');
-        await pipeline(
-            createReadLineStream(resolve(options.datasetFolder, './repository-files', file)),
-            processLines,
-            writeStream,
-        );
+        const fileLineStream = createReadLineStream(resolve(options.datasetFolder, './repository-files', file));
+
+        for await (const chunk of processLines(fileLineStream)) {
+            if (!writeStream.write(chunk)) {
+                await once(writeStream, 'drain');
+            }
+        }
     }
 
     writeStream.end();
