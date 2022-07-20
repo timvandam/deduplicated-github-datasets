@@ -325,9 +325,11 @@ def main():
         for epoch in range(args.num_train_epochs):
 
             for idx, batch in enumerate(train_dataloader):
-                break
+                print(len(batch), batch[0].size())
                 batch = tuple(t.to(device) for t in batch)
                 source_ids = batch[0]
+                print(source_ids)
+                break
                 loss, _, _ = model(source_ids, True)
 
                 if args.n_gpu > 1:

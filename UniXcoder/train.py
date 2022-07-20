@@ -36,7 +36,7 @@ import random
 import os
 import numpy as np
 from fuzzywuzzy import fuzz
-from torch.utils.data import TensorDataset, RandomSampler, DataLoader, SequentialSampler
+from torch.utils.data import TensorDataset, RandomSampler, DataLoader, SequentialSampler, IterableDataset
 from tqdm import tqdm
 from transformers import RobertaConfig, RobertaTokenizer, RobertaModel, AdamW, get_linear_schedule_with_warmup
 from Seq2Seq import Seq2Seq
@@ -113,104 +113,117 @@ def prepare_model(model_name: str, max_input_length: int, beam_size: int):
     return model, tokenizer
 
 
-def read_train_examples(dataset_folder: str):
-    train_file_path = get_train_file_path(dataset_folder)
+class AbstractIterableDataset(IterableDataset):
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.line_count = self._count_lines()
 
-    with open(train_file_path, "r", encoding="utf-8") as f:
-        examples = [
-            " ".join(line.strip().split()[1:])
-            for line in f
-            if len(line.strip()) > 0
-        ]
+    def _extract_input(self, line: str):
+        """
+        Extracts the input from a line
+        :param line: A single line
+        :return: Some output data
+        """
+        raise NotImplementedError()
 
-    return examples
+    def _extract_token_ids(self, data):
+        """
+        Converts input into token ids
+        :param data: Input data extracted in _extract_input
+        :return: An iterable containing lists of token ids (should be an iterable to make it possible to extract multiple
+                    sequences from one input)
+        """
+        raise NotImplementedError()
 
+    def _count_lines(self):
+        with open(self.file_path, "r", encoding='utf-8') as f:
+            return sum(1 for line in f)
 
-def read_validation_examples(dataset_folder: str):
-    validation_file_path = get_validation_file_path(dataset_folder)
+    def __len__(self):
+        return self.line_count
 
-    examples = []
-    with open(validation_file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if len(line.strip()) == 0:
-                continue
+    def __iter__(self):
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if len(line.strip()) == 0:
+                    continue
 
-            example = json.loads(line)
-
-            # replace \n with </s>, normalize spacing
-            left_context = example["leftContext"]
-            left_context = left_context.replace("\n", " </s> ") + " </s>"
-            left_context = left_context.split()
-            left_context = " ".join(left_context)
-
-            examples.append({
-                "input": left_context,
-                "output": example["groundTruth"],
-            })
-
-    return examples
-
-
-def tokenize_windowed(item):
-    i, example, max_length, tokenizer, window_offset = item
-
-    if window_offset is None:
-        raise Exception("window_offset is None")
-
-    if window_offset > max_length:
-        raise Exception(f"Window offset is greater than max length: {window_offset} > {max_length}")
-
-    source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
-
-    if len(source_tokens) < max_length - 3:
-        return [source_tokens]
-
-    windowed_tokens = np.lib.stride_tricks.sliding_window_view(
-        source_tokens,
-        window_shape=max_length - 3
-    )[::-1][::max_length - 3 - window_offset]
-
-    if i < 5:
-        print(f"*** Example {i} ***")
-        print(f"\tWindows: {len(windowed_tokens)}")
-        print(f"\tWindow sizes: {', '.join(map(str, map(len, windowed_tokens)))}")
-
-    return [["<s>", "<decoder-only>", "</s>"] + tokens for tokens in windowed_tokens]
+                data = self._extract_input(line)
+                yield from self._extract_token_ids(data)
 
 
-def tokenize_truncate_left(item):
-    i, example, max_length, tokenizer, window_offset = item
-
-    source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
-    source_tokens = ["<s>", "<decoder-only>", "</s>"] + source_tokens[-(max_length - 3):]
-    source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
-    padding_length = max_length - len(source_ids)
-    source_ids += [tokenizer.pad_token_id] * padding_length
-
-    if i < 5:
-        print(f"*** Example {i} ***")
-        print(f"\tSource Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
-        print(f"\tSource IDs: {' '.join(map(str, source_ids))}")
-
-    return [source_ids]
+def tokens_to_token_ids(tokenizer: RobertaTokenizer, max_length: int, tokens: List[str]):
+    token_ids = tokenizer.convert_tokens_to_ids(tokens)
+    padding_length = max_length - len(token_ids)
+    token_ids += [tokenizer.pad_token_id] * padding_length
+    return token_ids
 
 
-def examples_to_features(examples: List[str], tokenizer: RobertaTokenizer, max_length: int,
-                         truncate_mode: Union[Literal["truncate_left"], Literal["window"]], window_offset: int = None):
-    pool = multiprocessing.Pool(max(1, int(os.cpu_count() * 0.8)))
+class TrainDataset(AbstractIterableDataset):
+    def __init__(self, train_file_path: str, max_length: int, tokenizer: RobertaTokenizer, window_offset: int):
+        super().__init__(train_file_path)
 
-    tokenize_fn = None
-    if truncate_mode == "truncate_left":
-        tokenize_fn = tokenize_truncate_left
-    elif truncate_mode == "window":
-        tokenize_fn = tokenize_windowed
-    else:
-        raise Exception(f"Unknown truncate mode: {truncate_mode}")
+        if window_offset < 0:
+            raise Exception("Window offset must be >= 0")
 
-    sources = [(i, example, max_length, tokenizer, window_offset) for i, example in enumerate(examples)]
-    features = tqdm(pool.imap_unordered(tokenize_fn, sources, chunksize=50), total=len(sources))
+        if window_offset >= max_length:
+            raise Exception("Window offset must be < max_length")
 
-    return [window for windows in features for window in windows]
+        self.max_length = max_length
+        self.tokenizer = tokenizer
+        self.window_offset = window_offset
+
+    def _extract_input(self, line: str):
+        return " ".join(line.strip().split()[1:])
+
+    def _tokens_to_token_ids(self, tokens: List[str]):
+        return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
+
+    def _extract_token_ids(self, data):
+        tokens = [token for token in self.tokenizer.tokenize(data) if token != '\u0120']
+
+        if len(tokens) < self.max_length - 3:
+            yield self._tokens_to_token_ids(tokens)
+            return
+
+        for window in np.lib.stride_tricks.sliding_window_view(
+            tokens,
+            window_shape=self.max_length - 3
+        )[::self.max_length - 3 - self.window_offset]:
+            yield self._tokens_to_token_ids(["<s>", "<decoder-only>", "</s>"] + list(window))
+
+
+class ValidationDataset(AbstractIterableDataset):
+    def __init__(self, validation_file_path: str, max_length: int, tokenizer: RobertaTokenizer):
+        super().__init__(validation_file_path)
+
+        self.max_length = max_length
+        self.tokenizer = tokenizer
+
+    def _extract_input(self, line: str):
+        obj = json.loads(line)
+
+        # replace \n with </s>, normalize spacing, add </s> to end
+        left_context = obj["leftContext"]
+        left_context = left_context.replace("\n", " </s> ") + " </s>"
+        left_context = left_context.split()
+        left_context = " ".join(left_context)
+
+        return {
+            "input": left_context,
+            "output": obj["groundTruth"],
+        }
+
+    def _tokens_to_token_ids(self, tokens: List[str]):
+        return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
+
+    def _extract_token_ids(self, data):
+        tokens = [token for token in self.tokenizer.tokenize(data["input"]) if token != '\u0120']
+
+        # truncate from the left side and add prefix
+        tokens = ["<s>", "<decoder-only>", "</s>"] + tokens[-(self.max_length - 3):]
+
+        yield self._tokens_to_token_ids(tokens)
 
 
 def main(
@@ -244,32 +257,18 @@ def main(
         device = torch.device("cpu")
         model = model.to(device)
 
-    print("Loading validation examples")
-    validation_examples = read_validation_examples(dataset_folder)
-    validation_features = examples_to_features(
-        [x["input"] for x in validation_examples],
-        tokenizer,
-        max_input_length,
-        "truncate_left",
+    print("Loading training dataset")
+    train_dataset = TrainDataset(
+        train_file_path=get_train_file_path(dataset_folder),
+        max_length=max_input_length + max_output_length,
+        tokenizer=tokenizer,
+        window_offset=window_offset
     )
-    print("Read validation examples")
-
-    print("Loading training examples")
-    train_examples = read_train_examples(dataset_folder)
-    train_features = examples_to_features(
-        train_examples,
-        tokenizer,
-        max_input_length + max_output_length,
-        "window",
-        window_offset
-    )
-    train_dataset = TensorDataset(torch.tensor(train_features, dtype=torch.long))
-    train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
         train_dataset,
-        sampler=train_sampler,
         batch_size=batch_size // gradient_accumulation_steps
     )
+    print("Loaded training dataset")
 
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
@@ -289,20 +288,18 @@ def main(
     )
 
     print("***** Running Training *****")
-    print("\tNum examples = %d" % len(train_examples))
-    print("\tNum Epochs = %d" % num_epochs)
+    print("\tNum examples = %d" % len(train_dataset) )
     print("\tBatch size = %d" % batch_size)
-    print("\tSteps per epoch = %d" % (len(train_examples) // batch_size))
+    print("\tNum epochs = %d" % num_epochs)
+    print("\tSteps per epoch = %d" % len(train_dataloader))
 
     # this is all copied from the unixcoder code
     model.train()
     nb_tr_examples, nb_tr_steps, tr_loss, global_step, best_accuracy, best_loss = 0, 0, 0, 0, 0, 1e6
     losses = []
     for epoch in range(num_epochs):
-
         for idx, batch in enumerate(train_dataloader):
-            batch = tuple(t.to(device) for t in batch)
-            source_ids = batch[0]
+            source_ids = torch.transpose(torch.stack(batch), 0, 1).to(device)
             loss, _, _ = model(source_ids, True)
 
             losses.append(loss.item())
@@ -328,15 +325,15 @@ def main(
         nb_tr_examples, nb_tr_steps = 0, 0
 
         print("***** Running Validation *****")
-        print("\tNum examples = %d" % len(validation_examples))
 
         model.eval()
-        all_source_ids = torch.tensor(validation_features, dtype=torch.long)
-        validation_dataset = TensorDataset(all_source_ids)
-        validation_sampler = SequentialSampler(validation_dataset)
+        validation_dataset = ValidationDataset(
+            validation_file_path=get_validation_file_path(dataset_folder),
+            max_length=max_input_length,
+            tokenizer=tokenizer
+        )
         validation_dataloader = DataLoader(
             validation_dataset,
-            sampler=validation_sampler,
             batch_size=batch_size
         )
 
@@ -361,12 +358,12 @@ def main(
         EM = 0.0
         edit_sim = 0.0
         total = len(p)
-        for ref, gold in zip(p, validation_examples):
-            pred = " ".join(ref.strip().split())
-            gt = " ".join(gold["output"].strip().split())
-            edit_sim += fuzz.ratio(pred, gt)
-            if pred.split() == gt.split():
-                EM += 1
+        # for ref, gold in zip(p, validation_examples):
+        #     pred = " ".join(ref.strip().split())
+        #     gt = " ".join(gold["output"].strip().split())
+        #     edit_sim += fuzz.ratio(pred, gt)
+        #     if pred.split() == gt.split():
+        #         EM += 1
         validation_accuracy = round(EM / total * 100, 2)
         print("  %s = %s " % ("Acc", str(validation_accuracy)))
         print("  %s = %s " % ("Edit sim", str(round(edit_sim / total, 2))))
