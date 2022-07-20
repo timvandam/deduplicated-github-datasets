@@ -5,21 +5,30 @@ Usage:
    train.py <dataset_folder> [options]
 
 Options:
-    -m <model_name>, --model_name <model_name>                      Set the name of the model to be trained [default: microsoft/unixcoder-base]
+    -m <model_name>, --model_name <model_name>                      Set the name of the model to be trained
+                                                                    [default: microsoft/unixcoder-base]
     -l <learning_rate>, --learning_rate <learning_rate>             Set the learning rate [default: 0.00002]
-    --max_input_length <max_input_length>                           Set the maximum length of the input. If the input is larger than this length it is truncated
-                                                                    on the left side. Shorter inputs are padded [default: 936]
+    --max_input_length <max_input_length>                           Set the maximum length of the input. If the
+                                                                    validation input is larger than this length it is
+                                                                    truncated from the left. Train data uses a windowed
+                                                                    approach instead (see window_offset)  [default: 936]
     --max_output_length <max_output_length>                         Set the maximum length of the output [default: 64]
+    --window_offset <window_offset>                                 Set the window offset used for windowing train
+                                                                    inputs larger than the max allowed length.
+                                                                    The next window always starts at
+                                                                    *current_window_end - window_offset* [default: 0]
     -s <seed>, --seed <seed>                                        The seed used for randomized things [default: 42]
     --beam_size <beam_size>                                         Set the beam size for beam search [default: 3]
     -bs <batch_size>, --batch_size <batch_size>                     Set the batch size [default: 32]
     -ep <num_epochs>, --num_epochs <num_epochs>                     Set the number of epochs [default: 10]
-    --gradient_accumulation_steps <gradient_accumulation_steps>     Set the number of steps to accumulate gradients [default: 1]
+    --gradient_accumulation_steps <gradient_accumulation_steps>     Set the number of steps to accumulate gradients
+                                                                    [default: 1]
     --weight_decay <weight_decay>                                   Set the weight decay [default: 0.0]
-    --adam_epsilon <adam_epsilon>                                   Set the epsilon for Adam optimizer [default: 0.00000001]
+    --adam_epsilon <adam_epsilon>                                   Set the epsilon for Adam optimizer
+                                                                    [default: 0.00000001]
 """
 import multiprocessing
-from typing import List
+from typing import List, Union, Literal
 
 import torch
 from docopt import docopt
@@ -142,8 +151,36 @@ def read_validation_examples(dataset_folder: str):
     return examples
 
 
-def tokenize(item):
-    i, example, max_length, tokenizer = item
+def tokenize_windowed(item):
+    i, example, max_length, tokenizer, window_offset = item
+
+    if window_offset is None:
+        raise Exception("window_offset is None")
+
+    if window_offset > max_length:
+        raise Exception(f"Window offset is greater than max length: {window_offset} > {max_length}")
+
+    source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
+
+    if len(source_tokens) < max_length - 3:
+        return [source_tokens]
+
+    windowed_tokens = np.lib.stride_tricks.sliding_window_view(
+        source_tokens,
+        window_shape=max_length - 3
+    )[::-1][::max_length - 3 - window_offset]
+
+    if i < 5:
+        print(f"*** Example {i} ***")
+        print(f"\tWindows: {len(windowed_tokens)}")
+        print(f"\tWindow sizes: {', '.join(map(str, map(len, windowed_tokens)))}")
+
+    return [["<s>", "<decoder-only>", "</s>"] + tokens for tokens in windowed_tokens]
+
+
+def tokenize_truncate_left(item):
+    i, example, max_length, tokenizer, window_offset = item
+
     source_tokens = [x for x in tokenizer.tokenize(example) if x != '\u0120']
     source_tokens = ["<s>", "<decoder-only>", "</s>"] + source_tokens[-(max_length - 3):]
     source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
@@ -155,21 +192,25 @@ def tokenize(item):
         print(f"\tSource Tokens:", [x.replace('\u0120', '_') for x in source_tokens])
         print(f"\tSource IDs: {' '.join(map(str, source_ids))}")
 
-    return source_ids
+    return [source_ids]
 
 
-def examples_to_features(examples: List[str], tokenizer: RobertaTokenizer, max_length: int):
+def examples_to_features(examples: List[str], tokenizer: RobertaTokenizer, max_length: int,
+                         truncate_mode: Union[Literal["truncate_left"], Literal["window"]], window_offset: int = None):
     pool = multiprocessing.Pool(max(1, int(os.cpu_count() * 0.8)))
 
-    sources = [(i, example, max_length, tokenizer) for i, example in enumerate(examples)]
-    features = tqdm(pool.imap_unordered(
-        tokenize,
-        sources,
-        chunksize=100,
-    ), total=len(sources))
-    # features = [(print(x), tokenize(x))[1] for x in tqdm(sources, total=len(sources))]
+    tokenize_fn = None
+    if truncate_mode == "truncate_left":
+        tokenize_fn = tokenize_truncate_left
+    elif truncate_mode == "window":
+        tokenize_fn = tokenize_windowed
+    else:
+        raise Exception(f"Unknown truncate mode: {truncate_mode}")
 
-    return list(features)
+    sources = [(i, example, max_length, tokenizer, window_offset) for i, example in enumerate(examples)]
+    features = tqdm(pool.imap_unordered(tokenize_fn, sources, chunksize=50), total=len(sources))
+
+    return [window for windows in features for window in windows]
 
 
 def main(
@@ -178,6 +219,7 @@ def main(
         learning_rate: float,
         max_input_length: int,
         max_output_length: int,
+        window_offset: int,
         beam_size: int,
         batch_size: int,
         num_epochs: int,
@@ -204,13 +246,23 @@ def main(
 
     print("Loading validation examples")
     validation_examples = read_validation_examples(dataset_folder)
-    validation_features = examples_to_features([x["input"] for x in validation_examples], tokenizer, max_input_length)
+    validation_features = examples_to_features(
+        [x["input"] for x in validation_examples],
+        tokenizer,
+        max_input_length,
+        "truncate_left",
+    )
     print("Read validation examples")
 
     print("Loading training examples")
     train_examples = read_train_examples(dataset_folder)
-    # TODO: Windowed approach if the example is too big!!!
-    train_features = examples_to_features(train_examples, tokenizer, max_input_length + max_output_length)
+    train_features = examples_to_features(
+        train_examples,
+        tokenizer,
+        max_input_length + max_output_length,
+        "window",
+        window_offset
+    )
     train_dataset = TensorDataset(torch.tensor(train_features, dtype=torch.long))
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
@@ -326,7 +378,7 @@ def main(
             best_accuracy = validation_accuracy
             best_model = True
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        model_name = f"epoch-{epoch}-acc-{validation_accuracy*100:.3f}"
+        model_name = f"epoch-{epoch}-acc-{validation_accuracy * 100:.3f}"
         torch.save(model_to_save.state_dict(), get_model_file_path(dataset_folder, model_name))
         if best_model:
             with open(get_model_file_path(dataset_folder, "best_model"), "w", encoding="utf-8") as f:
@@ -342,6 +394,7 @@ if __name__ == '__main__':
         float(args['--learning_rate']),
         int(args['--max_input_length']),
         int(args['--max_output_length']),
+        int(args['--window_offset']),
         int(args['--beam_size']),
         int(args['--batch_size']),
         int(args['--num_epochs']),
