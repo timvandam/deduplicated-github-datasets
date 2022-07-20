@@ -1,2 +1,10 @@
 docopt==0.6.2
-numpy==1.20.3
+numpy~=1.22.3
+torch~=1.11.0
+tqdm~=4.64.0
+fuzzywuzzy~=0.18.0
+transformers~=4.19.2
+joblib~=1.1.0
+Levenshtein~=0.18.1
+nltk~=3.7
+pyparsing~=3.0.9

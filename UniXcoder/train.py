@@ -16,10 +16,10 @@ Options:
     --window_offset <window_offset>                                 Set the window offset used for windowing train
                                                                     inputs larger than the max allowed length.
                                                                     The next window always starts at
-                                                                    *current_window_end - window_offset* [default: 0]
+                                                                    *current_window_end - window_offset* [default: 100]
     -s <seed>, --seed <seed>                                        The seed used for randomized things [default: 42]
     --beam_size <beam_size>                                         Set the beam size for beam search [default: 3]
-    -bs <batch_size>, --batch_size <batch_size>                     Set the batch size [default: 32]
+    -bs <batch_size>, --batch_size <batch_size>                     Set the batch size [default: 8]
     -ep <num_epochs>, --num_epochs <num_epochs>                     Set the number of epochs [default: 10]
     --gradient_accumulation_steps <gradient_accumulation_steps>     Set the number of steps to accumulate gradients
                                                                     [default: 1]
@@ -61,7 +61,7 @@ def get_validation_file_path(dataset_folder: str):
 
 
 def get_model_folder_path(dataset_folder: str):
-    return os.path.join(dataset_folder, "datasets", "models")
+    return os.path.join(dataset_folder, "models")
 
 
 def get_model_file_path(dataset_folder: str, model_name: str):
@@ -107,7 +107,7 @@ def prepare_model(model_name: str, max_input_length: int, beam_size: int):
         beam_size=beam_size,
         max_length=max_input_length,
         sos_id=tokenizer.cls_token_id,
-        eos_id=tokenizer.sep_token_id,
+        eos_id=[tokenizer.sep_token_id],
     )
 
     return model, tokenizer
@@ -126,12 +126,11 @@ class AbstractIterableDataset(IterableDataset):
         """
         raise NotImplementedError()
 
-    def _extract_token_ids(self, data):
+    def _extract_output(self, data):
         """
-        Converts input into token ids
+        Converts input into some output (eg) token ids
         :param data: Input data extracted in _extract_input
-        :return: An iterable containing lists of token ids (should be an iterable to make it possible to extract multiple
-                    sequences from one input)
+        :return: An iterable containing lists of outputs (one input can have multiple outputs)
         """
         raise NotImplementedError()
 
@@ -149,7 +148,7 @@ class AbstractIterableDataset(IterableDataset):
                     continue
 
                 data = self._extract_input(line)
-                yield from self._extract_token_ids(data)
+                yield from self._extract_output(data)
 
 
 def tokens_to_token_ids(tokenizer: RobertaTokenizer, max_length: int, tokens: List[str]):
@@ -179,7 +178,7 @@ class TrainDataset(AbstractIterableDataset):
     def _tokens_to_token_ids(self, tokens: List[str]):
         return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
 
-    def _extract_token_ids(self, data):
+    def _extract_output(self, data):
         tokens = [token for token in self.tokenizer.tokenize(data) if token != '\u0120']
 
         if len(tokens) < self.max_length - 3:
@@ -190,7 +189,9 @@ class TrainDataset(AbstractIterableDataset):
             tokens,
             window_shape=self.max_length - 3
         )[::self.max_length - 3 - self.window_offset]:
-            yield self._tokens_to_token_ids(["<s>", "<decoder-only>", "</s>"] + list(window))
+            full_tokens = ["<s>", "<decoder-only>", "</s>"] + list(window)
+            token_ids = self._tokens_to_token_ids(full_tokens)
+            yield token_ids
 
 
 class ValidationDataset(AbstractIterableDataset):
@@ -217,13 +218,13 @@ class ValidationDataset(AbstractIterableDataset):
     def _tokens_to_token_ids(self, tokens: List[str]):
         return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
 
-    def _extract_token_ids(self, data):
+    def _extract_output(self, data):
         tokens = [token for token in self.tokenizer.tokenize(data["input"]) if token != '\u0120']
 
         # truncate from the left side and add prefix
         tokens = ["<s>", "<decoder-only>", "</s>"] + tokens[-(self.max_length - 3):]
 
-        yield self._tokens_to_token_ids(tokens)
+        yield self._tokens_to_token_ids(tokens), data["output"]
 
 
 def main(
@@ -244,7 +245,7 @@ def main(
     set_seed(seed)
     verify_files_exist(dataset_folder)
 
-    os.makedirs(os.path.join(dataset_folder, "models"), exist_ok=True)
+    os.makedirs(get_model_folder_path(dataset_folder), exist_ok=True)
 
     model, tokenizer = prepare_model(model_name, max_input_length, beam_size)
 
@@ -293,13 +294,12 @@ def main(
     print("\tNum epochs = %d" % num_epochs)
     print("\tSteps per epoch = %d" % len(train_dataloader))
 
-    # this is all copied from the unixcoder code
     model.train()
     nb_tr_examples, nb_tr_steps, tr_loss, global_step, best_accuracy, best_loss = 0, 0, 0, 0, 0, 1e6
     losses = []
     for epoch in range(num_epochs):
         for idx, batch in enumerate(train_dataloader):
-            source_ids = torch.transpose(torch.stack(batch), 0, 1).to(device)
+            source_ids = torch.transpose(torch.stack(batch), 0, 1).to(device).contiguous()
             loss, _, _ = model(source_ids, True)
 
             losses.append(loss.item())
@@ -337,36 +337,37 @@ def main(
             batch_size=batch_size
         )
 
-        p = []
-        for batch in tqdm(validation_dataloader, total=len(validation_dataloader)):
-            batch = tuple(t.to(device) for t in batch)
-            source_ids = batch[0]
+        EM = 0.0
+        edit_sim = 0.0
+        for batch, ground_truths in tqdm(validation_dataloader, total=len(validation_dataloader)):
+            source_ids = torch.transpose(torch.stack(batch), 0, 1).to(device).contiguous()
+
             with torch.no_grad():
                 preds = model(source_ids=source_ids)
-                for pred in preds:
+                for gt, pred in zip(ground_truths, preds):
                     t = pred[0].cpu().numpy()
                     t = list(t)
                     if 0 in t:
                         t = t[:t.index(0)]
-                    text = tokenizer.decode(t, clean_up_tokenization_spaces=False)
-                    if "{" in text:
-                        text = text[:text.index("{")]
-                    if "</s>" in text:
-                        text = text[:text.index("</s>")]
-                    p.append(text)
+                    pred = tokenizer.decode(t, clean_up_tokenization_spaces=False)
+                    if "</s>" in pred:
+                        pred = pred[:pred.index("</s>")]
+
+                    pred = " ".join(pred.strip().split())
+                    gt = " ".join(gt.strip().split())
+
+                    if pred == gt:
+                        EM += 1
+
+                    edit_sim += fuzz.ratio(pred, gt)
+
+                EM /= len(preds)
+                edit_sim /= len(preds)
+
         model.train()
-        EM = 0.0
-        edit_sim = 0.0
-        total = len(p)
-        # for ref, gold in zip(p, validation_examples):
-        #     pred = " ".join(ref.strip().split())
-        #     gt = " ".join(gold["output"].strip().split())
-        #     edit_sim += fuzz.ratio(pred, gt)
-        #     if pred.split() == gt.split():
-        #         EM += 1
-        validation_accuracy = round(EM / total * 100, 2)
+        validation_accuracy = round(EM * 100, 2)
         print("  %s = %s " % ("Acc", str(validation_accuracy)))
-        print("  %s = %s " % ("Edit sim", str(round(edit_sim / total, 2))))
+        print("  %s = %s " % ("Edit sim", str(round(edit_sim, 2))))
         print("  " + "*" * 20)
         best_model = False
         if validation_accuracy > best_accuracy:
@@ -375,7 +376,7 @@ def main(
             best_accuracy = validation_accuracy
             best_model = True
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        model_name = f"epoch-{epoch}-acc-{validation_accuracy * 100:.3f}"
+        model_name = f"epoch-{epoch}-acc-{str(validation_accuracy * 100).replace('.', '_')}"
         torch.save(model_to_save.state_dict(), get_model_file_path(dataset_folder, model_name))
         if best_model:
             with open(get_model_file_path(dataset_folder, "best_model"), "w", encoding="utf-8") as f:

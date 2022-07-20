@@ -325,11 +325,9 @@ def main():
         for epoch in range(args.num_train_epochs):
 
             for idx, batch in enumerate(train_dataloader):
-                print(len(batch), batch[0].size())
+                break
                 batch = tuple(t.to(device) for t in batch)
                 source_ids = batch[0]
-                print(source_ids)
-                break
                 loss, _, _ = model(source_ids, True)
 
                 if args.n_gpu > 1:
@@ -361,7 +359,7 @@ def main():
                 model.eval()
                 model.to(device)
                 eval_examples = read_examples(args.dev_filename)
-                print("Converting eval examples to features")
+                print(f"Converting eval examples to features (n={len(eval_examples)})")
                 eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='dev')
                 print("Done!")
                 all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
@@ -374,6 +372,7 @@ def main():
                 for batch in tqdm(eval_dataloader, total=len(eval_dataloader)):
                     batch = tuple(t.to(device) for t in batch)
                     source_ids = batch[0]
+                    print(source_ids, source_ids.size())
                     with torch.no_grad():
                         preds = model(source_ids=source_ids)
                         for pred in preds:
