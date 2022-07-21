@@ -27,20 +27,29 @@ Options:
     --adam_epsilon <adam_epsilon>                                   Set the epsilon for Adam optimizer
                                                                     [default: 0.00000001]
 """
-import multiprocessing
-from typing import List, Union, Literal
-
+from multiprocessing import Pool
+from typing import List
 import torch
 from docopt import docopt
 import random
 import os
 import numpy as np
 from fuzzywuzzy import fuzz
-from torch.utils.data import TensorDataset, RandomSampler, DataLoader, SequentialSampler, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 from transformers import RobertaConfig, RobertaTokenizer, RobertaModel, AdamW, get_linear_schedule_with_warmup
 from Seq2Seq import Seq2Seq
 import json
+import sys
+from functools import lru_cache
+
+
+def cache(f):
+    return lru_cache(maxsize=None)(f)
+
+
+def log(*args):
+    print(*args, flush=True)
 
 
 def set_seed(seed: int):
@@ -70,14 +79,13 @@ def get_model_file_path(dataset_folder: str, model_name: str):
 
 def verify_files_exist(dataset_folder: str):
     if not os.path.exists(dataset_folder):
-        print("Dataset folder does not exist")
-        exit(1)
+        raise Exception("Dataset folder does not exist")
+
     if not os.path.exists(get_train_file_path(dataset_folder)):
-        print("Train file does not exist")
-        exit(1)
+        raise Exception("Train file does not exist")
+
     if not os.path.exists(get_validation_file_path(dataset_folder)):
-        print("Validation file does not exist")
-        exit(1)
+        raise Exception("Validation file does not exist")
 
 
 def prepare_model(model_name: str, max_input_length: int, beam_size: int):
@@ -116,39 +124,51 @@ def prepare_model(model_name: str, max_input_length: int, beam_size: int):
 class AbstractIterableDataset(IterableDataset):
     def __init__(self, file_path: str):
         self.file_path = file_path
-        self.line_count = self._count_lines()
+        self.line_count = -1
 
-    def _extract_input(self, line: str):
+    def _extract_inputs(self, line: str):
         """
-        Extracts the input from a line
-        :param line: A single line
-        :return: Some output data
-        """
-        raise NotImplementedError()
-
-    def _extract_output(self, data):
-        """
-        Converts input into some output (eg) token ids
-        :param data: Input data extracted in _extract_input
-        :return: An iterable containing lists of outputs (one input can have multiple outputs)
+        Extracts inputs from a line.
+        Should return an iterable of inputs.
         """
         raise NotImplementedError()
 
-    def _count_lines(self):
-        with open(self.file_path, "r", encoding='utf-8') as f:
-            return sum(1 for line in f)
+    def _process_input(self, data):
+        """
+        Converts one input into one output (eg tokens to token ids)
+        """
+        raise NotImplementedError()
 
+    def _get_input_count(self, line: str):
+        return len(self._extract_inputs(line))
+
+    @cache
     def __len__(self):
-        return self.line_count
+        """
+        :return: The amount of inputs
+        """
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            total_lines = sum(1 for line in f if len(line.strip()) > 0)
+
+        with open(self.file_path, 'r', encoding='utf-8') as f, Pool(os.cpu_count()) as pool:
+            amounts = sum(pool.imap_unordered(
+                self._get_input_count,
+                tqdm(f, total=total_lines, file=sys.stdout),
+                chunksize=500
+            ))
+            return amounts
+
+    def _extract_processed_inputs(self, line: str):
+        inputs = self._extract_inputs(line)
+        return [self._process_input(x) for x in inputs]
 
     def __iter__(self):
-        with open(self.file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if len(line.strip()) == 0:
-                    continue
-
-                data = self._extract_input(line)
-                yield from self._extract_output(data)
+        with open(self.file_path, 'r', encoding='utf-8') as f, Pool(os.cpu_count()) as pool:
+            yield from pool.imap_unordered(
+                self._extract_processed_inputs,
+                f,
+                chunksize=10  # low chunk size because getting token ids is expensive and we want them fast
+            )
 
 
 def tokens_to_token_ids(tokenizer: RobertaTokenizer, max_length: int, tokens: List[str]):
@@ -172,26 +192,28 @@ class TrainDataset(AbstractIterableDataset):
         self.tokenizer = tokenizer
         self.window_offset = window_offset
 
-    def _extract_input(self, line: str):
-        return " ".join(line.strip().split()[1:])
+    def _extract_inputs(self, line: str):
+        result = []
 
-    def _tokens_to_token_ids(self, tokens: List[str]):
-        return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
-
-    def _extract_output(self, data):
+        data = " ".join(line.strip().split()[1:])
         tokens = [token for token in self.tokenizer.tokenize(data) if token != '\u0120']
 
         if len(tokens) < self.max_length - 3:
-            yield self._tokens_to_token_ids(tokens)
-            return
+            # yield ["<s>", "<decoder-only>", "</s>"] + tokens
+            result.append(["<s>", "<decoder-only>", "</s>"] + tokens)
+            return result
 
         for window in np.lib.stride_tricks.sliding_window_view(
-            tokens,
-            window_shape=self.max_length - 3
+                tokens,
+                window_shape=self.max_length - 3
         )[::self.max_length - 3 - self.window_offset]:
-            full_tokens = ["<s>", "<decoder-only>", "</s>"] + list(window)
-            token_ids = self._tokens_to_token_ids(full_tokens)
-            yield token_ids
+            # yield ["<s>", "<decoder-only>", "</s>"] + list(window)
+            result.append(["<s>", "<decoder-only>", "</s>"] + list(window))
+
+        return result
+
+    def _process_input(self, tokens: List[str]):
+        return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
 
 
 class ValidationDataset(AbstractIterableDataset):
@@ -201,7 +223,7 @@ class ValidationDataset(AbstractIterableDataset):
         self.max_length = max_length
         self.tokenizer = tokenizer
 
-    def _extract_input(self, line: str):
+    def _extract_inputs(self, line: str):
         obj = json.loads(line)
 
         # replace \n with </s>, normalize spacing, add </s> to end
@@ -210,21 +232,18 @@ class ValidationDataset(AbstractIterableDataset):
         left_context = left_context.split()
         left_context = " ".join(left_context)
 
-        return {
-            "input": left_context,
-            "output": obj["groundTruth"],
-        }
-
-    def _tokens_to_token_ids(self, tokens: List[str]):
-        return tokens_to_token_ids(self.tokenizer, self.max_length, tokens)
-
-    def _extract_output(self, data):
-        tokens = [token for token in self.tokenizer.tokenize(data["input"]) if token != '\u0120']
+        tokens = [token for token in self.tokenizer.tokenize(left_context) if token != '\u0120']
 
         # truncate from the left side and add prefix
         tokens = ["<s>", "<decoder-only>", "</s>"] + tokens[-(self.max_length - 3):]
 
-        yield self._tokens_to_token_ids(tokens), data["output"]
+        return [{
+            "input": tokens,
+            "output": obj["groundTruth"],
+        }]
+
+    def _process_input(self, obj):
+        return tokens_to_token_ids(self.tokenizer, self.max_length, obj["input"]), obj["output"]
 
 
 def main(
@@ -250,15 +269,27 @@ def main(
     model, tokenizer = prepare_model(model_name, max_input_length, beam_size)
 
     if torch.cuda.is_available():
-        print("CUDA available, using GPU")
+        log("CUDA available, using GPU")
         device = torch.device("cuda")
         model = model.to(device)
     else:
-        print("CUDA not available, using CPU")
+        log("CUDA not available, using CPU")
         device = torch.device("cpu")
         model = model.to(device)
 
-    print("Loading training dataset")
+    log("Loading validation dataset")
+    validation_dataset = ValidationDataset(
+        validation_file_path=get_validation_file_path(dataset_folder),
+        max_length=max_input_length,
+        tokenizer=tokenizer
+    )
+    validation_dataloader = DataLoader(
+        validation_dataset,
+        batch_size=batch_size
+    )
+    log(f"Loaded validation dataset: {len(validation_dataloader)} batches")
+
+    log("Loading train dataset")
     train_dataset = TrainDataset(
         train_file_path=get_train_file_path(dataset_folder),
         max_length=max_input_length + max_output_length,
@@ -269,7 +300,7 @@ def main(
         train_dataset,
         batch_size=batch_size // gradient_accumulation_steps
     )
-    print("Loaded training dataset")
+    log(f"Loaded train dataset: {len(train_dataloader)} batches")
 
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
@@ -288,11 +319,11 @@ def main(
         num_training_steps=len(train_dataloader) * num_epochs
     )
 
-    print("***** Running Training *****")
-    print("\tNum examples = %d" % len(train_dataset) )
-    print("\tBatch size = %d" % batch_size)
-    print("\tNum epochs = %d" % num_epochs)
-    print("\tSteps per epoch = %d" % len(train_dataloader))
+    log("***** Running Training *****")
+    log("\tNum examples = %d" % len(train_dataset))
+    log("\tBatch size = %d" % batch_size)
+    log("\tNum epochs = %d" % num_epochs)
+    log("\tSteps per epoch = %d" % len(train_dataloader))
 
     model.train()
     nb_tr_examples, nb_tr_steps, tr_loss, global_step, best_accuracy, best_loss = 0, 0, 0, 0, 0, 1e6
@@ -308,7 +339,7 @@ def main(
             tr_loss += loss.item()
             if (idx + 1) % 100 == 0:
                 # TODO: Add loss plot
-                print("epoch %d step %d loss %f" % (epoch, idx + 1, round(np.mean(losses[-100:]), 4)))
+                log("epoch %d step %d loss %f" % (epoch, idx + 1, round(np.mean(losses[-100:]), 4)))
             nb_tr_examples += source_ids.size(0)
             nb_tr_steps += 1
             loss.backward()
@@ -324,22 +355,13 @@ def main(
         tr_loss = 0
         nb_tr_examples, nb_tr_steps = 0, 0
 
-        print("***** Running Validation *****")
+        log("***** Running Validation *****")
 
         model.eval()
-        validation_dataset = ValidationDataset(
-            validation_file_path=get_validation_file_path(dataset_folder),
-            max_length=max_input_length,
-            tokenizer=tokenizer
-        )
-        validation_dataloader = DataLoader(
-            validation_dataset,
-            batch_size=batch_size
-        )
 
         EM = 0.0
         edit_sim = 0.0
-        for batch, ground_truths in tqdm(validation_dataloader, total=len(validation_dataloader)):
+        for batch, ground_truths in tqdm(validation_dataloader, total=len(validation_dataloader), file=sys.stdout):
             source_ids = torch.transpose(torch.stack(batch), 0, 1).to(device).contiguous()
 
             with torch.no_grad():
@@ -366,13 +388,13 @@ def main(
 
         model.train()
         validation_accuracy = round(EM * 100, 2)
-        print("  %s = %s " % ("Acc", str(validation_accuracy)))
-        print("  %s = %s " % ("Edit sim", str(round(edit_sim, 2))))
-        print("  " + "*" * 20)
+        log("  %s = %s " % ("Acc", str(validation_accuracy)))
+        log("  %s = %s " % ("Edit sim", str(round(edit_sim, 2))))
+        log("  " + "*" * 20)
         best_model = False
         if validation_accuracy > best_accuracy:
-            print("  Best acc: %s" % validation_accuracy)
-            print("  " + "*" * 20)
+            log("  Best acc: %s" % validation_accuracy)
+            log("  " + "*" * 20)
             best_accuracy = validation_accuracy
             best_model = True
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
@@ -385,7 +407,7 @@ def main(
 
 if __name__ == '__main__':
     args = docopt(__doc__)
-    print(args)
+    log(args)
     main(
         args['<dataset_folder>'],
         args['--model_name'],

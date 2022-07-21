@@ -13,5 +13,5 @@ module load 2022r2
 module load cuda/11.3
 module load python/3.8.12
 module load py-pip
-python -m pip install --user -r ../requirements.txt
+#python -m pip install --user -r ../requirements.txt
 python train.py /scratch/tovandam/datasets/javascript-dataset
