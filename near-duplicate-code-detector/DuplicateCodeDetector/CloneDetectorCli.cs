@@ -19,8 +19,8 @@ namespace NearCloneDetector
       --input=<path>                 The path to the input .jsonl.gz file.
       --id-fields=<fields>           A colon (:)-separated list of names of fields that form the identity of each entry [default: filename].
       --tokens-field=<name>          The name of the field containing the tokens of the code [default: tokens].
-      --key-jaccard-threshold=<val>  The Jaccard similarity threshold for token-sets [default: 0.8].
-      --jaccard-threshold=<val>      The Jaccard similarity threshold for token multisets [default: 0.7].
+      --key-jaccard-threshold=<val>  The Jaccard similarity threshold for token-sets [default: 0.5].
+      --jaccard-threshold=<val>      The Jaccard similarity threshold for token multisets [default: 0.5].
 
     ";
 

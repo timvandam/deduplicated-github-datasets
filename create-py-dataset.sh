@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+TOKEN="$1"
+DATASET_FOLDER="$2"
+
 set -e
 
 cd ./github-data-fetching/incoder-analysis-java
@@ -9,9 +12,9 @@ cd ./../../
 cd ./near-duplicate-code-detector/tokenizers/python
 pip install -r requirements.txt
 cd ./../../../
-mkdir -p ./python-dataset
-java -jar ./github-data-fetching/incoder-analysis-java/build/libs/incoder-analysis-1.0-SNAPSHOT-all.jar -l python -e py -o ./python-dataset -t "$1"
-python ./near-duplicate-code-detector/tokenizers/python/tokenizefiles.py ./python-dataset/repository-files ./python-dataset/file-tokens
-dotnet run --project ./near-duplicate-code-detector/DuplicateCodeDetector/DuplicateCodeDetector.csproj --dir=./python-dataset/file-tokens ./python-dataset/duplicate-files
+mkdir -p "$DATASET_FOLDER"
+java -jar ./github-data-fetching/incoder-analysis-java/build/libs/incoder-analysis-1.0-SNAPSHOT-all.jar -l python -e py -o "$DATASET_FOLDER" -t "$TOKEN"
+python ./near-duplicate-code-detector/tokenizers/python/tokenizefiles.py "$DATASET_FOLDER/repository-files" "$DATASET_FOLDER/file-tokens"
+dotnet run --project ./near-duplicate-code-detector/DuplicateCodeDetector/DuplicateCodeDetector.csproj --dir="$DATASET_FOLDER/file-tokens" "$DATASET_FOLDER/duplicate-files"
 pip install -r requirements.txt
-python remove_dupes.py ./python-dataset
+python remove_dupes.py "$DATASET_FOLDER"
